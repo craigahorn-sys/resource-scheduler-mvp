@@ -84,21 +84,26 @@ def _pool_total_as_of(engine, region_code: str, resource_class_id: int, as_of_da
     adj = _scalar(engine, "SELECT COALESCE(SUM(quantity_change),0) FROM pool_adjustments WHERE region_code=:r AND resource_class_id=:rc AND adjustment_date<=:d", {'r': region_code, 'rc': resource_class_id, 'd': as_of_date}) or 0.0
     return float(base) + float(adj)
 
-
 def _overlapping_internal_allocations(engine, region_code: str, resource_class_id: int, start_date, end_date, exclude_requirement_id: int | None = None):
     sql = """
         SELECT COALESCE(SUM(rf.quantity_assigned),0)
         FROM requirement_fulfillment rf
         JOIN job_requirements jr ON rf.requirement_id = jr.id
         JOIN jobs j ON jr.job_id = j.id
-        WHERE rf.fulfillment_type='internal_pool'
-          AND j.region_code=:r
-          AND jr.resource_class_id=:rc
+        WHERE rf.fulfillment_type = 'internal_pool'
+          AND j.region_code = :r
+          AND jr.resource_class_id = :rc
           AND jr.id != COALESCE(:exclude_requirement_id, -1)
-          AND date(j.job_start_date, '-' || jr.days_before_job_start || ' day') <= :end_date
-          AND date(j.job_start_date, '+' || (j.job_duration_days - 1 + jr.days_after_job_end) || ' day') >= :start_date
+          AND (j.job_start_date - (jr.days_before_job_start * INTERVAL '1 day')) <= :end_date
+          AND (j.job_start_date + ((j.job_duration_days - 1 + jr.days_after_job_end) * INTERVAL '1 day')) >= :start_date
     """
-    val = _scalar(engine, sql, {'r': region_code, 'rc': resource_class_id, 'start_date': start_date, 'end_date': end_date, 'exclude_requirement_id': exclude_requirement_id}) or 0.0
+    val = _scalar(engine, sql, {
+        'r': region_code,
+        'rc': resource_class_id,
+        'start_date': start_date,
+        'end_date': end_date,
+        'exclude_requirement_id': exclude_requirement_id
+    }) or 0.0
     return float(val)
 
 
