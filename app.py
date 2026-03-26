@@ -21,6 +21,9 @@ st.caption("Priority-based scheduling with region-scoped workflow and pop-up row
 engine = get_engine()
 init_db(engine)
 
+if "create_job_start_date" not in st.session_state:
+    st.session_state["create_job_start_date"] = date.today()
+
 def format_date_value(value):
     if pd.isna(value):
         return ""
@@ -394,7 +397,7 @@ with tab_jobs:
             location = st.text_input("Location")
         with c2:
             job_name = st.text_input("Job Name")
-            job_start_date = st.date_input("Job Start Date", value=date.today())
+            job_start_date = st.date_input("Job Start Date", key="create_job_start_date")
             st.caption(f"Selected: {job_start_date.strftime('%m/%d/%Y')}")
             job_duration_days = st.number_input("Job Duration (days)", min_value=1, value=7, step=1)
         with c3:
