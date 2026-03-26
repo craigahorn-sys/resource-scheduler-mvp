@@ -85,13 +85,12 @@ def upsert_pool(engine, region_code: str, resource_class_id: int, base_quantity:
             notes = EXCLUDED.notes
         """,
         {
-            "region_code": region_code,
+            "region_code": str(region_code),
             "resource_class_id": int(resource_class_id),
             "base_quantity": float(base_quantity),
-            "notes": notes,
+            "notes": str(notes) if notes is not None else "",
         },
     )
-
 
 def add_pool_adjustment(engine, data: dict):
     execute(
