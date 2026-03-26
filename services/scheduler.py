@@ -2,28 +2,26 @@
 from .db import execute, query_df
 
 def recalc_all_requirements(engine):
-    execute(engine,"DELETE FROM requirement_fulfillment")
-    req = query_df(engine,"SELECT * FROM job_requirements")
-    pools = query_df(engine,"SELECT * FROM resource_pools")
-    for _,r in req.iterrows():
-        pool = pools[pools.resource_class_id==r.resource_class_id]
-        if pool.empty: continue
-        assign = min(float(pool.iloc[0].base_quantity), float(r.quantity_required))
+    execute(engine, "DELETE FROM requirement_fulfillment")
+    req = query_df(engine, "SELECT * FROM job_requirements")
+    pools = query_df(engine, "SELECT * FROM resource_pools")
+    for _, r in req.iterrows():
+        pool = pools[(pools.resource_class_id==r.resource_class_id)]
+        if pool.empty:
+            continue
+        available = float(pool.iloc[0].base_quantity)
+        assign = min(available, float(r.quantity_required))
         if assign>0:
-            execute(engine,"INSERT INTO requirement_fulfillment(requirement_id,quantity_assigned) VALUES (:r,:q)",{"r":int(r.id),"q":assign})
+            execute(engine,
+                "INSERT INTO requirement_fulfillment(requirement_id, quantity_assigned) VALUES (:r,:q)",
+                {"r": int(r.id), "q": assign}
+            )
 
-def create_job(engine,name,region):
-    execute(engine,"INSERT INTO jobs(job_name,region_code) VALUES (:n,:r)",{"n":name,"r":region})
+def create_job(engine,data):
+    execute(engine,"INSERT INTO jobs(job_name,region_code,job_start_date,job_duration_days,mob_days_before_job,demob_days_after_job,status) VALUES (:job_name,:region_code,:job_start_date,:job_duration_days,:mob_days_before_job,:demob_days_after_job,:status)",data)
 
-def delete_job(engine,id):
-    execute(engine,"DELETE FROM jobs WHERE id=:id",{"id":id})
-
-def create_requirement(engine,job,rc,qty):
-    execute(engine,"INSERT INTO job_requirements(job_id,resource_class_id,quantity_required) VALUES (:j,:r,:q)",{"j":job,"r":rc,"q":qty})
-    recalc_all_requirements(engine)
-
-def delete_requirement(engine,id):
-    execute(engine,"DELETE FROM job_requirements WHERE id=:id",{"id":id})
+def create_requirement(engine,data):
+    execute(engine,"INSERT INTO job_requirements(job_id,resource_class_id,quantity_required,days_before_job_start,days_after_job_end,priority) VALUES (:job_id,:resource_class_id,:quantity_required,:days_before_job_start,:days_after_job_end,:priority)",data)
     recalc_all_requirements(engine)
 
 def upsert_pool(engine,region,rc,qty):
