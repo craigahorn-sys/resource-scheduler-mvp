@@ -381,6 +381,11 @@ with st.sidebar:
         st.success("Rebalanced")
         st.rerun()
 
+if "last_active_region" not in st.session_state:
+    st.session_state["last_active_region"] = ACTIVE_REGION
+if st.session_state["last_active_region"] != ACTIVE_REGION:
+    st.session_state["last_active_region"] = ACTIVE_REGION
+
 tab_jobs, tab_requirements, tab_pools, tab_allocations, tab_planning, tab_calendar, tab_gantt = st.tabs(
     ["Jobs", "Requirements", "Pools", "Allocations", "Planning Board", "Calendar", "Gantt"]
 )
@@ -395,31 +400,32 @@ with tab_jobs:
         st.session_state["create_job_reset_counter"] = 0
 
     reset_counter = st.session_state["create_job_reset_counter"]
+    region_key_suffix = f"{ACTIVE_REGION}_{reset_counter}"
 
     default_region_value = ACTIVE_REGION if ACTIVE_REGION != "Global" else region_list[default_region_index]
 
     c1, c2, c3 = st.columns(3)
     with c1:
-        customer = st.text_input("Customer", key=f"create_job_customer_{reset_counter}")
+        customer = st.text_input("Customer", key=f"create_job_customer_{region_key_suffix}")
         region_code = st.selectbox(
             "Region",
             region_list,
             index=region_list.index(default_region_value) if default_region_value in region_list else default_region_index,
             format_func=region_format,
             disabled=region_disabled(ACTIVE_REGION),
-            key=f"create_job_region_{reset_counter}",
+            key=f"create_job_region_{region_key_suffix}",
         )
-        location = st.text_input("Location", key=f"create_job_location_{reset_counter}")
+        location = st.text_input("Location", key=f"create_job_location_{region_key_suffix}")
     with c2:
-        job_name = st.text_input("Job Name", key=f"create_job_name_{reset_counter}")
-        job_start_date = st.date_input("Job Start Date", value=date.today(), key=f"create_job_start_date_{reset_counter}")
+        job_name = st.text_input("Job Name", key=f"create_job_name_{region_key_suffix}")
+        job_start_date = st.date_input("Job Start Date", value=date.today(), key=f"create_job_start_date_{region_key_suffix}")
         st.caption(f"Selected: {job_start_date.strftime('%m/%d/%Y')}")
-        job_duration_days = st.number_input("Job Duration (days)", min_value=1, value=7, step=1, key=f"create_job_duration_{reset_counter}")
+        job_duration_days = st.number_input("Job Duration (days)", min_value=1, value=7, step=1, key=f"create_job_duration_{region_key_suffix}")
     with c3:
-        mob_days_before_job = st.number_input("Mobilization Days Before Job", min_value=0, value=3, step=1, key=f"create_job_mob_{reset_counter}")
-        demob_days_after_job = st.number_input("Demobilization Days After Job", min_value=0, value=2, step=1, key=f"create_job_demob_{reset_counter}")
-        status = st.selectbox("Status", ["Planned", "Tentative", "Active", "Billing Pending", "Complete", "Cancelled"], key=f"create_job_status_{reset_counter}")
-    notes = st.text_area("Notes", key=f"create_job_notes_{reset_counter}")
+        mob_days_before_job = st.number_input("Mobilization Days Before Job", min_value=0, value=3, step=1, key=f"create_job_mob_{region_key_suffix}")
+        demob_days_after_job = st.number_input("Demobilization Days After Job", min_value=0, value=2, step=1, key=f"create_job_demob_{region_key_suffix}")
+        status = st.selectbox("Status", ["Planned", "Tentative", "Active", "Billing Pending", "Complete", "Cancelled"], key=f"create_job_status_{region_key_suffix}")
+    notes = st.text_area("Notes", key=f"create_job_notes_{region_key_suffix}")
 
     dates_preview = calc_job_dates(
         job_start_date,
@@ -433,7 +439,7 @@ with tab_jobs:
         f"Demob End: {format_date_value(dates_preview['demob_end_date'])}"
     )
 
-    if st.button("Create Job", key=f"create_job_submit_{reset_counter}"):
+    if st.button("Create Job", key=f"create_job_submit_{region_key_suffix}"):
         if not job_name:
             st.error("Job Name is required.")
         else:
@@ -511,13 +517,13 @@ with tab_pools:
     default_region_index = region_default_index(region_codes, ACTIVE_REGION)
     with st.form("upsert_pool_form"):
         c1, c2, c3 = st.columns(3)
-        region_code = c1.selectbox("Region", region_codes, index=default_region_index, format_func=region_format, disabled=region_disabled(ACTIVE_REGION), key="pool_region")
-        selected_rc_display = c2.selectbox("Resource Class", rc_display["display"].tolist(), key="pool_rc")
+        region_code = c1.selectbox("Region", region_codes, index=default_region_index, format_func=region_format, disabled=region_disabled(ACTIVE_REGION), key=f"pool_region_{ACTIVE_REGION}")
+        selected_rc_display = c2.selectbox("Resource Class", rc_display["display"].tolist(), key=f"pool_rc_{ACTIVE_REGION}")
         selected_rc = rc_display.loc[rc_display["display"] == selected_rc_display].iloc[0]
         step = quantity_step(str(selected_rc["unit_type"]), str(selected_rc["category"]))
         fmt = quantity_format(str(selected_rc["unit_type"]), str(selected_rc["category"]))
-        base_quantity = c3.number_input(f"Base Quantity ({selected_rc['unit_type']})", min_value=0.0, value=0.0, step=step, format=fmt, key="pool_base_quantity")
-        notes = st.text_input("Notes", key="pool_notes")
+        base_quantity = c3.number_input(f"Base Quantity ({selected_rc['unit_type']})", min_value=0.0, value=0.0, step=step, format=fmt, key=f"pool_base_quantity_{ACTIVE_REGION}")
+        notes = st.text_input("Notes", key=f"pool_notes_{ACTIVE_REGION}")
         if st.form_submit_button("Save Pool Quantity"):
             upsert_pool(engine, active_region_value(ACTIVE_REGION, region_code), int(selected_rc["id"]), float(base_quantity), notes)
             st.success("Pool saved.")
@@ -526,8 +532,8 @@ with tab_pools:
     st.subheader("Pool Adjustment Log")
     with st.form("pool_adjustment_form", clear_on_submit=True):
         c1, c2, c3, c4 = st.columns(4)
-        adj_region = c1.selectbox("Region", region_codes, index=default_region_index, format_func=region_format, disabled=region_disabled(ACTIVE_REGION), key="adj_region")
-        adj_rc_display = c2.selectbox("Resource Class", rc_display["display"].tolist(), key="adj_rc")
+        adj_region = c1.selectbox("Region", region_codes, index=default_region_index, format_func=region_format, disabled=region_disabled(ACTIVE_REGION), key=f"adj_region_{ACTIVE_REGION}")
+        adj_rc_display = c2.selectbox("Resource Class", rc_display["display"].tolist(), key=f"adj_rc_{ACTIVE_REGION}")
         adj_rc = rc_display.loc[rc_display["display"] == adj_rc_display].iloc[0]
         step = quantity_step(str(adj_rc["unit_type"]), str(adj_rc["category"]))
         fmt = quantity_format(str(adj_rc["unit_type"]), str(adj_rc["category"]))
@@ -536,7 +542,7 @@ with tab_pools:
         st.caption(f"Selected: {adjustment_date.strftime('%m/%d/%Y')}")
         c5, c6 = st.columns(2)
         reason = c5.selectbox("Reason", ["Purchase","Transfer In","Transfer Out","Retirement","Damage/Loss","Correction"])
-        adj_notes = c6.text_input("Notes", key="adj_notes")
+        adj_notes = c6.text_input("Notes", key=f"adj_notes_{ACTIVE_REGION}")
         if st.form_submit_button("Add Adjustment"):
             add_pool_adjustment(engine, {
                 "region_code": active_region_value(ACTIVE_REGION, adj_region),
