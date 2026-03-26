@@ -91,6 +91,7 @@ def upsert_pool(engine, region_code: str, resource_class_id: int, base_quantity:
             "notes": str(notes) if notes is not None else "",
         },
     )
+    recalc_all_requirements(engine)
 
 def add_pool_adjustment(engine, data: dict):
     execute(
@@ -107,6 +108,7 @@ def add_pool_adjustment(engine, data: dict):
         """,
         data,
     )
+    recalc_all_requirements(engine)
 
 
 def _requirement_window(engine, requirement_id: int):
@@ -472,12 +474,12 @@ def pool_snapshot_df(engine, as_of_date):
         committed_qty = float(r["committed_quantity"])
         total_pool = float(r["total_pool"])
 
-        if total_pool <= 0 and related_shortfall > 0:
+        if related_shortfall > 0:
             pool_status.append("Fully Allocated with Shortfall")
-        elif available <= 0 and related_shortfall > 0:
-            pool_status.append("Fully Allocated with Shortfall")
-        elif available <= 0 and committed_qty > 0:
+        elif committed_qty > 0 and available <= 0:
             pool_status.append("Fully Allocated")
+        elif committed_qty > 0 and available > 0:
+            pool_status.append("Partially Committed")
         else:
             pool_status.append("Available")
 
@@ -498,3 +500,141 @@ def pool_snapshot_df(engine, as_of_date):
             "pool_status",
         ]
     ]
+
+
+def delete_pool(engine, pool_id: int):
+    execute(engine, "DELETE FROM resource_pools WHERE id = :pool_id", {"pool_id": int(pool_id)})
+    recalc_all_requirements(engine)
+
+
+def delete_pool_adjustment(engine, adjustment_id: int):
+    execute(engine, "DELETE FROM pool_adjustments WHERE id = :id", {"id": int(adjustment_id)})
+    recalc_all_requirements(engine)
+
+
+def update_job(engine, job_id: int, data: dict):
+    dates = calc_job_dates(
+        data["job_start_date"],
+        data["job_duration_days"],
+        data["mob_days_before_job"],
+        data["demob_days_after_job"],
+    )
+    execute(
+        engine,
+        """
+        UPDATE jobs
+        SET job_name = :job_name,
+            region_code = :region_code,
+            customer = :customer,
+            location = :location,
+            job_start_date = :job_start_date,
+            job_duration_days = :job_duration_days,
+            mob_days_before_job = :mob_days_before_job,
+            demob_days_after_job = :demob_days_after_job,
+            status = :status,
+            notes = :notes
+        WHERE id = :job_id
+        """,
+        {**data, "job_id": int(job_id), "job_start_date": dates["job_start_date"]},
+    )
+    recalc_all_requirements(engine)
+
+
+def delete_job(engine, job_id: int):
+    execute(engine, "DELETE FROM jobs WHERE id = :job_id", {"job_id": int(job_id)})
+    recalc_all_requirements(engine)
+
+
+def update_requirement(engine, requirement_id: int, data: dict):
+    execute(
+        engine,
+        """
+        UPDATE job_requirements
+        SET resource_class_id = :resource_class_id,
+            quantity_required = :quantity_required,
+            days_before_job_start = :days_before_job_start,
+            days_after_job_end = :days_after_job_end,
+            priority = :priority,
+            notes = :notes
+        WHERE id = :requirement_id
+        """,
+        {
+            "requirement_id": int(requirement_id),
+            "resource_class_id": int(data["resource_class_id"]),
+            "quantity_required": float(data["quantity_required"]),
+            "days_before_job_start": int(data["days_before_job_start"]),
+            "days_after_job_end": int(data["days_after_job_end"]),
+            "priority": data["priority"],
+            "notes": data.get("notes", ""),
+        },
+    )
+    recalc_all_requirements(engine)
+
+
+def delete_requirement(engine, requirement_id: int):
+    execute(engine, "DELETE FROM job_requirements WHERE id = :requirement_id", {"requirement_id": int(requirement_id)})
+    recalc_all_requirements(engine)
+
+
+def get_pools_df(engine):
+    return query_df(
+        engine,
+        """
+        SELECT
+            rp.id,
+            rp.region_code,
+            rp.resource_class_id,
+            rc.class_name,
+            rc.category,
+            rc.unit_type,
+            rp.base_quantity,
+            rp.notes
+        FROM resource_pools rp
+        JOIN resource_classes rc ON rp.resource_class_id = rc.id
+        ORDER BY rp.region_code, rp.id
+        """
+    )
+
+
+def allocation_debug_df(engine):
+    req = requirement_summary_df(engine)
+    if req.empty:
+        return req
+
+    rows = []
+    for _, row in req.iterrows():
+        total_pool = _pool_total_as_of(
+            engine,
+            str(row["region_code"]),
+            int(row["resource_class_id"]),
+            row["required_start"],
+        )
+        overlap = _overlapping_internal_allocations(
+            engine,
+            str(row["region_code"]),
+            int(row["resource_class_id"]),
+            row["required_start"],
+            row["required_end"],
+            exclude_requirement_id=int(row["id"]),
+        )
+        available_estimate = max(float(total_pool) - float(overlap), 0.0)
+        rows.append(
+            {
+                "requirement_id": int(row["id"]),
+                "job_code": row["job_code"],
+                "job_name": row["job_name"],
+                "region_code": row["region_code"],
+                "resource_class_id": int(row["resource_class_id"]),
+                "class_name": row["class_name"],
+                "priority": row["priority"],
+                "required_start": row["required_start"],
+                "required_end": row["required_end"],
+                "quantity_required": float(row["quantity_required"]),
+                "quantity_assigned": float(row["quantity_assigned"]),
+                "quantity_shortfall": float(row["quantity_shortfall"]),
+                "pool_total_as_of_start": float(total_pool),
+                "overlapping_prior_assigned": float(overlap),
+                "available_estimate": float(available_estimate),
+            }
+        )
+    return pd.DataFrame(rows)
