@@ -67,11 +67,43 @@ def create_job(engine, data: dict) -> int:
         return int(res.scalar_one())
 
 
+def update_job(engine, job_id: int, data: dict):
+    dates = calc_job_dates(
+        data["job_start_date"],
+        data["job_duration_days"],
+        data["mob_days_before_job"],
+        data["demob_days_after_job"],
+    )
+    execute(
+        engine,
+        """
+        UPDATE jobs
+        SET job_name = :job_name,
+            region_code = :region_code,
+            customer = :customer,
+            location = :location,
+            job_start_date = :job_start_date,
+            job_duration_days = :job_duration_days,
+            mob_days_before_job = :mob_days_before_job,
+            demob_days_after_job = :demob_days_after_job,
+            status = :status,
+            notes = :notes
+        WHERE id = :job_id
+        """,
+        {**data, "job_id": int(job_id), "job_start_date": dates["job_start_date"]},
+    )
+    recalc_all_requirements(engine)
+
+
+def delete_job(engine, job_id: int):
+    execute(engine, "DELETE FROM jobs WHERE id = :job_id", {"job_id": int(job_id)})
+    recalc_all_requirements(engine)
+
+
 def get_jobs_df(engine):
     df = query_df(engine, "SELECT * FROM jobs ORDER BY id DESC")
     if df.empty:
         return df
-
     ends = df.apply(
         lambda r: calc_job_dates(
             r["job_start_date"],
@@ -211,16 +243,6 @@ def _windows_overlap(start_a, end_a, start_b, end_b) -> bool:
     return pd.to_datetime(start_a) <= pd.to_datetime(end_b) and pd.to_datetime(end_a) >= pd.to_datetime(start_b)
 
 
-def _delete_internal_pool_allocations(engine):
-    execute(
-        engine,
-        """
-        DELETE FROM requirement_fulfillment
-        WHERE fulfillment_type = 'internal_pool'
-        """
-    )
-
-
 def recalc_all_requirements(engine):
     req = _requirement_base_df(engine)
     with engine.begin() as conn:
@@ -324,6 +346,11 @@ def upsert_pool(engine, region_code: str, resource_class_id: int, base_quantity:
     recalc_all_requirements(engine)
 
 
+def delete_pool(engine, pool_id: int):
+    execute(engine, "DELETE FROM resource_pools WHERE id = :pool_id", {"pool_id": int(pool_id)})
+    recalc_all_requirements(engine)
+
+
 def add_pool_adjustment(engine, data: dict):
     execute(
         engine,
@@ -339,6 +366,11 @@ def add_pool_adjustment(engine, data: dict):
         """,
         data,
     )
+    recalc_all_requirements(engine)
+
+
+def delete_pool_adjustment(engine, adjustment_id: int):
+    execute(engine, "DELETE FROM pool_adjustments WHERE id = :id", {"id": int(adjustment_id)})
     recalc_all_requirements(engine)
 
 
@@ -366,6 +398,37 @@ def create_requirement(engine, data: dict):
     return requirement_id
 
 
+def update_requirement(engine, requirement_id: int, data: dict):
+    execute(
+        engine,
+        """
+        UPDATE job_requirements
+        SET resource_class_id = :resource_class_id,
+            quantity_required = :quantity_required,
+            days_before_job_start = :days_before_job_start,
+            days_after_job_end = :days_after_job_end,
+            priority = :priority,
+            notes = :notes
+        WHERE id = :requirement_id
+        """,
+        {
+            "requirement_id": int(requirement_id),
+            "resource_class_id": int(data["resource_class_id"]),
+            "quantity_required": float(data["quantity_required"]),
+            "days_before_job_start": int(data["days_before_job_start"]),
+            "days_after_job_end": int(data["days_after_job_end"]),
+            "priority": data["priority"],
+            "notes": data.get("notes", ""),
+        },
+    )
+    recalc_all_requirements(engine)
+
+
+def delete_requirement(engine, requirement_id: int):
+    execute(engine, "DELETE FROM job_requirements WHERE id = :requirement_id", {"requirement_id": int(requirement_id)})
+    recalc_all_requirements(engine)
+
+
 def requirement_summary_df(engine):
     df = query_df(
         engine,
@@ -381,6 +444,7 @@ def requirement_summary_df(engine):
             jr.days_before_job_start,
             jr.days_after_job_end,
             jr.priority,
+            jr.notes,
             j.job_start_date,
             j.job_duration_days,
             j.mob_days_before_job,
@@ -401,6 +465,7 @@ def requirement_summary_df(engine):
             jr.days_before_job_start,
             jr.days_after_job_end,
             jr.priority,
+            jr.notes,
             j.job_start_date,
             j.job_duration_days,
             j.mob_days_before_job,
@@ -444,6 +509,10 @@ def requirement_summary_df(engine):
 
     df["allocation_status"] = df.apply(status, axis=1)
     return df
+
+
+def get_requirements_df(engine):
+    return requirement_summary_df(engine)
 
 
 def get_fulfillment_df(engine):
@@ -491,6 +560,48 @@ def get_fulfillment_df(engine):
     df["required_start"] = starts
     df["required_end"] = ends
     return df
+
+
+def get_pools_df(engine):
+    return query_df(
+        engine,
+        """
+        SELECT
+            rp.id,
+            rp.region_code,
+            rp.resource_class_id,
+            rc.class_name,
+            rc.category,
+            rc.unit_type,
+            rp.base_quantity,
+            rp.notes
+        FROM resource_pools rp
+        JOIN resource_classes rc ON rp.resource_class_id = rc.id
+        ORDER BY rp.region_code, rc.category, rc.class_name
+        """
+    )
+
+
+def get_pool_adjustments_df(engine):
+    return query_df(
+        engine,
+        """
+        SELECT
+            pa.id,
+            pa.region_code,
+            pa.resource_class_id,
+            rc.class_name,
+            rc.unit_type,
+            pa.quantity_change,
+            pa.adjustment_date,
+            pa.reason,
+            pa.notes,
+            pa.created_at
+        FROM pool_adjustments pa
+        JOIN resource_classes rc ON pa.resource_class_id = rc.id
+        ORDER BY pa.id DESC
+        """
+    )
 
 
 def pool_snapshot_df(engine, as_of_date):
@@ -561,6 +672,7 @@ def pool_snapshot_df(engine, as_of_date):
 
     return df[
         [
+            "id",
             "region_code",
             "class_name",
             "category",
