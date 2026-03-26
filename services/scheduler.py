@@ -7,9 +7,21 @@ from .db import execute, query_df
 from .models import calc_job_dates
 
 
+PRIORITY_RANK = {
+    "Critical": 1,
+    "High": 2,
+    "Normal": 3,
+    "Low": 4,
+}
+
+
 def _scalar(engine, sql, params=None):
     with engine.begin() as conn:
         return conn.execute(text(sql), params or {}).scalar()
+
+
+def _scalar_conn(conn, sql, params=None):
+    return conn.execute(text(sql), params or {}).scalar()
 
 
 def _next_job_code(engine, region_code: str, year: int) -> str:
@@ -59,6 +71,7 @@ def get_jobs_df(engine):
     df = query_df(engine, "SELECT * FROM jobs ORDER BY id DESC")
     if df.empty:
         return df
+
     ends = df.apply(
         lambda r: calc_job_dates(
             r["job_start_date"],
@@ -74,42 +87,7 @@ def get_jobs_df(engine):
     return df
 
 
-def upsert_pool(engine, region_code: str, resource_class_id: int, base_quantity: float, notes: str = ""):
-    execute(
-        engine,
-        """
-        INSERT INTO resource_pools(region_code, resource_class_id, base_quantity, notes)
-        VALUES (:region_code, :resource_class_id, :base_quantity, :notes)
-        ON CONFLICT (region_code, resource_class_id) DO UPDATE
-        SET base_quantity = EXCLUDED.base_quantity,
-            notes = EXCLUDED.notes
-        """,
-        {
-            "region_code": str(region_code),
-            "resource_class_id": int(resource_class_id),
-            "base_quantity": float(base_quantity),
-            "notes": str(notes) if notes is not None else "",
-        },
-    )
-
-def add_pool_adjustment(engine, data: dict):
-    execute(
-        engine,
-        """
-        INSERT INTO pool_adjustments(
-            region_code, resource_class_id, quantity_change,
-            adjustment_date, reason, notes
-        )
-        VALUES (
-            :region_code, :resource_class_id, :quantity_change,
-            :adjustment_date, :reason, :notes
-        )
-        """,
-        data,
-    )
-
-
-def _requirement_window(engine, requirement_id: int):
+def _requirement_base_df(engine):
     df = query_df(
         engine,
         """
@@ -120,37 +98,53 @@ def _requirement_window(engine, requirement_id: int):
             jr.quantity_required,
             jr.days_before_job_start,
             jr.days_after_job_end,
+            jr.priority,
+            jr.notes,
+            j.job_code,
+            j.job_name,
             j.region_code,
             j.job_start_date,
             j.job_duration_days,
             j.mob_days_before_job,
-            j.demob_days_after_job
+            j.demob_days_after_job,
+            rc.class_name,
+            rc.category,
+            rc.unit_type
         FROM job_requirements jr
         JOIN jobs j ON jr.job_id = j.id
-        WHERE jr.id = :id
+        JOIN resource_classes rc ON jr.resource_class_id = rc.id
+        ORDER BY jr.id
         """,
-        {"id": requirement_id},
     )
     if df.empty:
-        return None
+        return df
 
-    r = df.iloc[0]
-    dates = calc_job_dates(
-        r["job_start_date"],
-        int(r["job_duration_days"]),
-        int(r["mob_days_before_job"]),
-        int(r["demob_days_after_job"]),
-    )
-    req_start = pd.to_datetime(dates["job_start_date"]) - pd.Timedelta(days=int(r["days_before_job_start"]))
-    req_end = pd.to_datetime(dates["job_end_date"]) + pd.Timedelta(days=int(r["days_after_job_end"]))
+    required_start_list = []
+    required_end_list = []
+    priority_rank_list = []
 
-    return {
-        "region_code": r["region_code"],
-        "resource_class_id": int(r["resource_class_id"]),
-        "required_start": req_start.date(),
-        "required_end": req_end.date(),
-        "quantity_required": float(r["quantity_required"]),
-    }
+    for _, r in df.iterrows():
+        dates = calc_job_dates(
+            r["job_start_date"],
+            int(r["job_duration_days"]),
+            int(r["mob_days_before_job"]),
+            int(r["demob_days_after_job"]),
+        )
+        required_start = (
+            pd.to_datetime(dates["job_start_date"]) - pd.Timedelta(days=int(r["days_before_job_start"]))
+        ).date()
+        required_end = (
+            pd.to_datetime(dates["job_end_date"]) + pd.Timedelta(days=int(r["days_after_job_end"]))
+        ).date()
+
+        required_start_list.append(required_start)
+        required_end_list.append(required_end)
+        priority_rank_list.append(PRIORITY_RANK.get(str(r["priority"]), 999))
+
+    df["required_start"] = required_start_list
+    df["required_end"] = required_end_list
+    df["priority_rank"] = priority_rank_list
+    return df
 
 
 def _pool_total_as_of(engine, region_code: str, resource_class_id: int, as_of_date):
@@ -183,105 +177,169 @@ def _pool_total_as_of(engine, region_code: str, resource_class_id: int, as_of_da
     return float(base) + float(adj)
 
 
-def _overlapping_internal_allocations(
-    engine,
-    region_code: str,
-    resource_class_id: int,
-    start_date,
-    end_date,
-    exclude_requirement_id: int | None = None,
-):
-    sql = """
-        SELECT COALESCE(SUM(rf.quantity_assigned), 0)
-        FROM requirement_fulfillment rf
-        JOIN job_requirements jr ON rf.requirement_id = jr.id
-        JOIN jobs j ON jr.job_id = j.id
-        WHERE rf.fulfillment_type = 'internal_pool'
-          AND j.region_code = :r
-          AND jr.resource_class_id = :rc
-          AND jr.id != COALESCE(:exclude_requirement_id, -1)
-          AND (j.job_start_date - (jr.days_before_job_start * INTERVAL '1 day')) <= :end_date
-          AND (j.job_start_date + ((j.job_duration_days - 1 + jr.days_after_job_end) * INTERVAL '1 day')) >= :start_date
-    """
-    val = (
-        _scalar(
-            engine,
-            sql,
-            {
-                "r": region_code,
-                "rc": resource_class_id,
-                "start_date": start_date,
-                "end_date": end_date,
-                "exclude_requirement_id": exclude_requirement_id,
-            },
+def _pool_total_as_of_conn(conn, region_code: str, resource_class_id: int, as_of_date):
+    base = (
+        _scalar_conn(
+            conn,
+            """
+            SELECT COALESCE(base_quantity, 0)
+            FROM resource_pools
+            WHERE region_code = :r AND resource_class_id = :rc
+            """,
+            {"r": region_code, "rc": resource_class_id},
         )
         or 0.0
     )
-    return float(val)
-
-
-def _recalc_requirement_allocation(engine, requirement_id: int):
-    info = _requirement_window(engine, requirement_id)
-    if not info:
-        return
-
-    total_pool = _pool_total_as_of(
-        engine,
-        info["region_code"],
-        info["resource_class_id"],
-        info["required_start"],
+    adj = (
+        _scalar_conn(
+            conn,
+            """
+            SELECT COALESCE(SUM(quantity_change), 0)
+            FROM pool_adjustments
+            WHERE region_code = :r
+              AND resource_class_id = :rc
+              AND adjustment_date <= :d
+            """,
+            {"r": region_code, "rc": resource_class_id, "d": as_of_date},
+        )
+        or 0.0
     )
-    overlap = _overlapping_internal_allocations(
-        engine,
-        info["region_code"],
-        info["resource_class_id"],
-        info["required_start"],
-        info["required_end"],
-        exclude_requirement_id=requirement_id,
-    )
-    available = max(total_pool - overlap, 0.0)
-    assign_qty = min(info["quantity_required"], available)
+    return float(base) + float(adj)
 
-    existing = _scalar(
+
+def _windows_overlap(start_a, end_a, start_b, end_b) -> bool:
+    return pd.to_datetime(start_a) <= pd.to_datetime(end_b) and pd.to_datetime(end_a) >= pd.to_datetime(start_b)
+
+
+def _delete_internal_pool_allocations(engine):
+    execute(
         engine,
         """
-        SELECT id
-        FROM requirement_fulfillment
-        WHERE requirement_id = :rid
-          AND fulfillment_type = 'internal_pool'
-        """,
-        {"rid": requirement_id},
+        DELETE FROM requirement_fulfillment
+        WHERE fulfillment_type = 'internal_pool'
+        """
     )
 
-    if existing and assign_qty > 0:
-        execute(
-            engine,
-            """
-            UPDATE requirement_fulfillment
-            SET quantity_assigned = :q,
-                source_name = 'Internal Pool',
-                notes = 'Auto-allocated'
-            WHERE id = :id
-            """,
-            {"q": assign_qty, "id": existing},
-        )
-    elif existing and assign_qty <= 0:
-        execute(engine, "DELETE FROM requirement_fulfillment WHERE id = :id", {"id": existing})
-    elif assign_qty > 0:
-        execute(
-            engine,
-            """
-            INSERT INTO requirement_fulfillment(
-                requirement_id, fulfillment_type, source_name,
-                specific_resource_name, quantity_assigned, notes
+
+def recalc_all_requirements(engine):
+    req = _requirement_base_df(engine)
+    with engine.begin() as conn:
+        conn.execute(
+            text(
+                """
+                DELETE FROM requirement_fulfillment
+                WHERE fulfillment_type = 'internal_pool'
+                """
             )
-            VALUES (
-                :rid, 'internal_pool', 'Internal Pool',
-                NULL, :q, 'Auto-allocated'
-            )
-            """,
-            {"rid": requirement_id, "q": assign_qty},
         )
+
+        if req.empty:
+            return
+
+        req = req.sort_values(
+            by=["priority_rank", "required_start", "job_start_date", "id"],
+            ascending=[True, True, True, True],
+        ).reset_index(drop=True)
+
+        allocations_by_bucket: dict[tuple[str, int], list[dict]] = {}
+
+        for _, row in req.iterrows():
+            bucket = (str(row["region_code"]), int(row["resource_class_id"]))
+            total_pool = _pool_total_as_of_conn(
+                conn,
+                str(row["region_code"]),
+                int(row["resource_class_id"]),
+                row["required_start"],
+            )
+
+            prior_allocs = allocations_by_bucket.get(bucket, [])
+            overlapping_committed = 0.0
+
+            for alloc in prior_allocs:
+                if _windows_overlap(
+                    row["required_start"],
+                    row["required_end"],
+                    alloc["required_start"],
+                    alloc["required_end"],
+                ):
+                    overlapping_committed += float(alloc["quantity_assigned"])
+
+            available = max(float(total_pool) - float(overlapping_committed), 0.0)
+            assign_qty = min(float(row["quantity_required"]), available)
+
+            if assign_qty > 0:
+                conn.execute(
+                    text(
+                        """
+                        INSERT INTO requirement_fulfillment(
+                            requirement_id, fulfillment_type, source_name,
+                            specific_resource_name, quantity_assigned, notes
+                        )
+                        VALUES (
+                            :rid, 'internal_pool', 'Internal Pool',
+                            NULL, :q,
+                            :notes
+                        )
+                        """
+                    ),
+                    {
+                        "rid": int(row["id"]),
+                        "q": float(assign_qty),
+                        "notes": (
+                            f"Auto-allocated by priority. "
+                            f"Pool={float(total_pool):.2f}, "
+                            f"overlap_committed={float(overlapping_committed):.2f}, "
+                            f"available={float(available):.2f}"
+                        ),
+                    },
+                )
+
+                allocations_by_bucket.setdefault(bucket, []).append(
+                    {
+                        "requirement_id": int(row["id"]),
+                        "required_start": row["required_start"],
+                        "required_end": row["required_end"],
+                        "quantity_assigned": float(assign_qty),
+                    }
+                )
+
+
+def upsert_pool(engine, region_code: str, resource_class_id: int, base_quantity: float, notes: str = ""):
+    execute(
+        engine,
+        """
+        INSERT INTO resource_pools(region_code, resource_class_id, base_quantity, notes)
+        VALUES (:region_code, :resource_class_id, :base_quantity, :notes)
+        ON CONFLICT (region_code, resource_class_id) DO UPDATE
+        SET base_quantity = EXCLUDED.base_quantity,
+            notes = EXCLUDED.notes
+        """,
+        {
+            "region_code": str(region_code),
+            "resource_class_id": int(resource_class_id),
+            "base_quantity": float(base_quantity),
+            "notes": str(notes) if notes is not None else "",
+        },
+    )
+    recalc_all_requirements(engine)
+
+
+def add_pool_adjustment(engine, data: dict):
+    execute(
+        engine,
+        """
+        INSERT INTO pool_adjustments(
+            region_code, resource_class_id, quantity_change,
+            adjustment_date, reason, notes
+        )
+        VALUES (
+            :region_code, :resource_class_id, :quantity_change,
+            :adjustment_date, :reason, :notes
+        )
+        """,
+        data,
+    )
+    recalc_all_requirements(engine)
 
 
 def create_requirement(engine, data: dict):
@@ -304,7 +362,7 @@ def create_requirement(engine, data: dict):
         )
         requirement_id = int(res.scalar_one())
 
-    _recalc_requirement_allocation(engine, requirement_id)
+    recalc_all_requirements(engine)
     return requirement_id
 
 
@@ -361,8 +419,12 @@ def requirement_summary_df(engine):
             int(r["mob_days_before_job"]),
             int(r["demob_days_after_job"]),
         )
-        starts.append((pd.to_datetime(dates["job_start_date"]) - pd.Timedelta(days=int(r["days_before_job_start"]))).date())
-        ends.append((pd.to_datetime(dates["job_end_date"]) + pd.Timedelta(days=int(r["days_after_job_end"]))).date())
+        starts.append(
+            (pd.to_datetime(dates["job_start_date"]) - pd.Timedelta(days=int(r["days_before_job_start"]))).date()
+        )
+        ends.append(
+            (pd.to_datetime(dates["job_end_date"]) + pd.Timedelta(days=int(r["days_after_job_end"]))).date()
+        )
 
     df["required_start"] = starts
     df["required_end"] = ends
@@ -385,18 +447,22 @@ def requirement_summary_df(engine):
 
 
 def get_fulfillment_df(engine):
-    return query_df(
+    df = query_df(
         engine,
         """
         SELECT
             rf.*,
+            jr.days_before_job_start,
+            jr.days_after_job_end,
             j.job_code,
             j.job_name,
             j.region_code,
+            j.job_start_date,
+            j.job_duration_days,
+            j.mob_days_before_job,
+            j.demob_days_after_job,
             rc.class_name,
-            rc.unit_type,
-            (j.job_start_date - (jr.days_before_job_start * INTERVAL '1 day'))::date AS required_start,
-            (j.job_start_date + ((j.job_duration_days - 1 + jr.days_after_job_end) * INTERVAL '1 day'))::date AS required_end
+            rc.unit_type
         FROM requirement_fulfillment rf
         JOIN job_requirements jr ON rf.requirement_id = jr.id
         JOIN jobs j ON jr.job_id = j.id
@@ -404,6 +470,27 @@ def get_fulfillment_df(engine):
         ORDER BY rf.id DESC
         """,
     )
+    if df.empty:
+        return df
+
+    starts, ends = [], []
+    for _, r in df.iterrows():
+        dates = calc_job_dates(
+            r["job_start_date"],
+            int(r["job_duration_days"]),
+            int(r["mob_days_before_job"]),
+            int(r["demob_days_after_job"]),
+        )
+        starts.append(
+            (pd.to_datetime(dates["job_start_date"]) - pd.Timedelta(days=int(r["days_before_job_start"]))).date()
+        )
+        ends.append(
+            (pd.to_datetime(dates["job_end_date"]) + pd.Timedelta(days=int(r["days_after_job_end"]))).date()
+        )
+
+    df["required_start"] = starts
+    df["required_end"] = ends
+    return df
 
 
 def pool_snapshot_df(engine, as_of_date):
@@ -435,8 +522,12 @@ def pool_snapshot_df(engine, as_of_date):
 
     req = requirement_summary_df(engine)
     committed = []
+    pool_status = []
+
     for _, r in df.iterrows():
         q = 0.0
+        related_shortfall = 0.0
+
         if not req.empty:
             mask = (
                 (req["region_code"] == r["region_code"])
@@ -445,39 +536,27 @@ def pool_snapshot_df(engine, as_of_date):
                 & (pd.to_datetime(req["required_end"]) >= pd.to_datetime(as_of_date))
             )
             q = float(req.loc[mask, "quantity_assigned"].sum())
+            related_shortfall = float(req.loc[mask, "quantity_shortfall"].sum())
+
         committed.append(q)
+
+        total_pool = float(r["base_quantity"]) + float(r["adjustment_total"])
+        available = max(total_pool - q, 0.0)
+
+        if related_shortfall > 0:
+            pool_status.append("Fully Allocated with Shortfall")
+        elif q > 0 and available <= 0:
+            pool_status.append("Fully Allocated")
+        elif q > 0 and available > 0:
+            pool_status.append("Partially Committed")
+        else:
+            pool_status.append("Available")
 
     df["base_quantity"] = df["base_quantity"].astype(float)
     df["adjustment_total"] = df["adjustment_total"].astype(float)
     df["total_pool"] = df["base_quantity"] + df["adjustment_total"]
     df["committed_quantity"] = committed
     df["available_quantity"] = (df["total_pool"] - df["committed_quantity"]).clip(lower=0)
-
-    pool_status = []
-    for _, r in df.iterrows():
-        related_shortfall = 0.0
-        if not req.empty:
-            mask = (
-                (req["region_code"] == r["region_code"])
-                & (req["class_name"] == r["class_name"])
-                & (pd.to_datetime(req["required_start"]) <= pd.to_datetime(as_of_date))
-                & (pd.to_datetime(req["required_end"]) >= pd.to_datetime(as_of_date))
-            )
-            related_shortfall = float(req.loc[mask, "quantity_shortfall"].sum())
-
-        available = float(r["available_quantity"])
-        committed_qty = float(r["committed_quantity"])
-        total_pool = float(r["total_pool"])
-
-        if total_pool <= 0 and related_shortfall > 0:
-            pool_status.append("Fully Allocated with Shortfall")
-        elif available <= 0 and related_shortfall > 0:
-            pool_status.append("Fully Allocated with Shortfall")
-        elif available <= 0 and committed_qty > 0:
-            pool_status.append("Fully Allocated")
-        else:
-            pool_status.append("Available")
-
     df["pool_status"] = pool_status
 
     return df[
@@ -494,3 +573,86 @@ def pool_snapshot_df(engine, as_of_date):
             "pool_status",
         ]
     ]
+
+
+def allocation_debug_df(engine):
+    req = _requirement_base_df(engine)
+    if req.empty:
+        return req
+
+    assigned_df = query_df(
+        engine,
+        """
+        SELECT
+            requirement_id,
+            COALESCE(SUM(quantity_assigned), 0) AS quantity_assigned
+        FROM requirement_fulfillment
+        WHERE fulfillment_type = 'internal_pool'
+        GROUP BY requirement_id
+        """
+    )
+
+    if assigned_df.empty:
+        assigned_df = pd.DataFrame(columns=["requirement_id", "quantity_assigned"])
+
+    req = req.merge(
+        assigned_df,
+        how="left",
+        left_on="id",
+        right_on="requirement_id",
+    )
+    req["quantity_assigned"] = req["quantity_assigned"].fillna(0.0).astype(float)
+
+    debug_rows = []
+    sorted_req = req.sort_values(
+        by=["region_code", "resource_class_id", "priority_rank", "required_start", "job_start_date", "id"],
+        ascending=[True, True, True, True, True, True],
+    ).reset_index(drop=True)
+
+    for pos, (_, row) in enumerate(sorted_req.iterrows()):
+        total_pool = _pool_total_as_of(
+            engine,
+            str(row["region_code"]),
+            int(row["resource_class_id"]),
+            row["required_start"],
+        )
+
+        overlapping_assigned = 0.0
+        prior_rows = sorted_req.iloc[:pos]
+        same_bucket = prior_rows[
+            (prior_rows["region_code"] == row["region_code"])
+            & (prior_rows["resource_class_id"] == row["resource_class_id"])
+        ]
+
+        for _, other in same_bucket.iterrows():
+            if _windows_overlap(
+                row["required_start"],
+                row["required_end"],
+                other["required_start"],
+                other["required_end"],
+            ):
+                overlapping_assigned += float(other["quantity_assigned"])
+
+        available_estimate = max(float(total_pool) - float(overlapping_assigned), 0.0)
+
+        debug_rows.append(
+            {
+                "requirement_id": int(row["id"]),
+                "job_code": row["job_code"],
+                "job_name": row["job_name"],
+                "region_code": row["region_code"],
+                "class_name": row["class_name"],
+                "priority": row["priority"],
+                "priority_rank": int(row["priority_rank"]),
+                "required_start": row["required_start"],
+                "required_end": row["required_end"],
+                "quantity_required": float(row["quantity_required"]),
+                "quantity_assigned": float(row["quantity_assigned"]),
+                "quantity_shortfall": max(float(row["quantity_required"]) - float(row["quantity_assigned"]), 0.0),
+                "pool_total_as_of_start": float(total_pool),
+                "overlapping_prior_assigned": float(overlapping_assigned),
+                "available_estimate": float(available_estimate),
+            }
+        )
+
+    return pd.DataFrame(debug_rows)
