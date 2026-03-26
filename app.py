@@ -470,25 +470,72 @@ with tab_requirements:
     else:
         job_options = jobs_df.assign(display=jobs_df["job_code"] + " | " + jobs_df["job_name"])
         rc_display = resource_options_df()
-        with st.form("create_requirement_form", clear_on_submit=True):
-            c1, c2, c3 = st.columns(3)
-            selected_job_display = c1.selectbox("Job", job_options["display"].tolist())
-            selected_job = job_options.loc[job_options["display"] == selected_job_display].iloc[0]
-            selected_rc_display = c2.selectbox("Resource Class", rc_display["display"].tolist())
-            selected_rc = rc_display.loc[rc_display["display"] == selected_rc_display].iloc[0]
-            step = quantity_step(str(selected_rc["unit_type"]), str(selected_rc["category"]))
-            fmt = quantity_format(str(selected_rc["unit_type"]), str(selected_rc["category"]))
-            quantity_required = c3.number_input(f"Quantity Required ({selected_rc['unit_type']})", min_value=0.0, value=step, step=step, format=fmt)
-            c4, c5, c6 = st.columns(3)
-            days_before_job_start = c4.number_input("Days Before Job Start", min_value=0, value=0, step=1)
-            days_after_job_end = c5.number_input("Days After Job End", min_value=0, value=0, step=1)
-            priority = c6.selectbox("Priority", ["Low","Normal","High","Critical"], index=1)
-            req_notes = st.text_area("Notes")
-            req_start = pd.to_datetime(selected_job["job_start_date"]).date() - pd.Timedelta(days=int(days_before_job_start))
-            req_end = pd.to_datetime(selected_job["job_end_date"]).date() + pd.Timedelta(days=int(days_after_job_end))
-            st.info(f"Requirement Window: {format_date_value(req_start)} to {format_date_value(req_end)}")
-            if st.form_submit_button("Add Requirement"):
-                create_requirement(engine, {
+
+        if "create_req_reset_counter" not in st.session_state:
+            st.session_state["create_req_reset_counter"] = 0
+        req_reset_counter = st.session_state["create_req_reset_counter"]
+        req_key_suffix = f"{ACTIVE_REGION}_{req_reset_counter}"
+
+        c1, c2, c3 = st.columns(3)
+
+        selected_job_display = c1.selectbox(
+            "Job",
+            job_options["display"].tolist(),
+            key=f"create_req_job_{req_key_suffix}",
+        )
+        selected_job = job_options.loc[job_options["display"] == selected_job_display].iloc[0]
+
+        selected_rc_display = c2.selectbox(
+            "Resource Class",
+            rc_display["display"].tolist(),
+            key=f"create_req_rc_{req_key_suffix}",
+        )
+        selected_rc = rc_display.loc[rc_display["display"] == selected_rc_display].iloc[0]
+
+        step = quantity_step(str(selected_rc["unit_type"]), str(selected_rc["category"]))
+        fmt = quantity_format(str(selected_rc["unit_type"]), str(selected_rc["category"]))
+
+        quantity_required = c3.number_input(
+            f"Quantity Required ({selected_rc['unit_type']})",
+            min_value=0.0,
+            value=step,
+            step=step,
+            format=fmt,
+            key=f"create_req_qty_{req_key_suffix}",
+        )
+
+        c4, c5, c6 = st.columns(3)
+        days_before_job_start = c4.number_input(
+            "Days Before Job Start",
+            min_value=0,
+            value=0,
+            step=1,
+            key=f"create_req_before_{req_key_suffix}",
+        )
+        days_after_job_end = c5.number_input(
+            "Days After Job End",
+            min_value=0,
+            value=0,
+            step=1,
+            key=f"create_req_after_{req_key_suffix}",
+        )
+        priority = c6.selectbox(
+            "Priority",
+            ["Low", "Normal", "High", "Critical"],
+            index=1,
+            key=f"create_req_priority_{req_key_suffix}",
+        )
+
+        req_notes = st.text_area("Notes", key=f"create_req_notes_{req_key_suffix}")
+
+        req_start = pd.to_datetime(selected_job["job_start_date"]).date() - pd.Timedelta(days=int(days_before_job_start))
+        req_end = pd.to_datetime(selected_job["job_end_date"]).date() + pd.Timedelta(days=int(days_after_job_end))
+        st.info(f"Requirement Window: {format_date_value(req_start)} to {format_date_value(req_end)}")
+
+        if st.button("Add Requirement", key=f"create_req_submit_{req_key_suffix}"):
+            create_requirement(
+                engine,
+                {
                     "job_id": int(selected_job["id"]),
                     "resource_class_id": int(selected_rc["id"]),
                     "quantity_required": float(quantity_required),
@@ -496,9 +543,11 @@ with tab_requirements:
                     "days_after_job_end": int(days_after_job_end),
                     "priority": priority,
                     "notes": req_notes,
-                })
-                st.success("Requirement added.")
-                st.rerun()
+                },
+            )
+            st.success("Requirement added.")
+            st.session_state["create_req_reset_counter"] += 1
+            st.rerun()
 
     st.subheader("Requirement Summary")
     req_summary = region_filter(requirement_summary_df(engine), ACTIVE_REGION)
