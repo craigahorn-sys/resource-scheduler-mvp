@@ -391,53 +391,35 @@ with tab_jobs:
     region_list = regions_df["region_code"].tolist()
     default_region_index = region_default_index(region_list, ACTIVE_REGION)
 
-    if "create_job_customer" not in st.session_state:
-        st.session_state["create_job_customer"] = ""
-    if "create_job_region" not in st.session_state:
-        st.session_state["create_job_region"] = region_list[default_region_index]
-    if "create_job_location" not in st.session_state:
-        st.session_state["create_job_location"] = ""
-    if "create_job_name" not in st.session_state:
-        st.session_state["create_job_name"] = ""
-    if "create_job_start_date" not in st.session_state:
-        st.session_state["create_job_start_date"] = date.today()
-    if "create_job_duration" not in st.session_state:
-        st.session_state["create_job_duration"] = 7
-    if "create_job_mob" not in st.session_state:
-        st.session_state["create_job_mob"] = 3
-    if "create_job_demob" not in st.session_state:
-        st.session_state["create_job_demob"] = 2
-    if "create_job_status" not in st.session_state:
-        st.session_state["create_job_status"] = "Planned"
-    if "create_job_notes" not in st.session_state:
-        st.session_state["create_job_notes"] = ""
+    if "create_job_reset_counter" not in st.session_state:
+        st.session_state["create_job_reset_counter"] = 0
 
-    if ACTIVE_REGION != "Global":
-        st.session_state["create_job_region"] = ACTIVE_REGION
+    reset_counter = st.session_state["create_job_reset_counter"]
+
+    default_region_value = ACTIVE_REGION if ACTIVE_REGION != "Global" else region_list[default_region_index]
 
     c1, c2, c3 = st.columns(3)
     with c1:
-        customer = st.text_input("Customer", key="create_job_customer")
+        customer = st.text_input("Customer", key=f"create_job_customer_{reset_counter}")
         region_code = st.selectbox(
             "Region",
             region_list,
-            index=region_list.index(st.session_state["create_job_region"]) if st.session_state["create_job_region"] in region_list else default_region_index,
+            index=region_list.index(default_region_value) if default_region_value in region_list else default_region_index,
             format_func=region_format,
             disabled=region_disabled(ACTIVE_REGION),
-            key="create_job_region_widget",
+            key=f"create_job_region_{reset_counter}",
         )
-        st.session_state["create_job_region"] = region_code
-        location = st.text_input("Location", key="create_job_location")
+        location = st.text_input("Location", key=f"create_job_location_{reset_counter}")
     with c2:
-        job_name = st.text_input("Job Name", key="create_job_name")
-        job_start_date = st.date_input("Job Start Date", key="create_job_start_date")
+        job_name = st.text_input("Job Name", key=f"create_job_name_{reset_counter}")
+        job_start_date = st.date_input("Job Start Date", value=date.today(), key=f"create_job_start_date_{reset_counter}")
         st.caption(f"Selected: {job_start_date.strftime('%m/%d/%Y')}")
-        job_duration_days = st.number_input("Job Duration (days)", min_value=1, step=1, key="create_job_duration")
+        job_duration_days = st.number_input("Job Duration (days)", min_value=1, value=7, step=1, key=f"create_job_duration_{reset_counter}")
     with c3:
-        mob_days_before_job = st.number_input("Mobilization Days Before Job", min_value=0, step=1, key="create_job_mob")
-        demob_days_after_job = st.number_input("Demobilization Days After Job", min_value=0, step=1, key="create_job_demob")
-        status = st.selectbox("Status", ["Planned", "Tentative", "Active", "Billing Pending", "Complete", "Cancelled"], key="create_job_status")
-    notes = st.text_area("Notes", key="create_job_notes")
+        mob_days_before_job = st.number_input("Mobilization Days Before Job", min_value=0, value=3, step=1, key=f"create_job_mob_{reset_counter}")
+        demob_days_after_job = st.number_input("Demobilization Days After Job", min_value=0, value=2, step=1, key=f"create_job_demob_{reset_counter}")
+        status = st.selectbox("Status", ["Planned", "Tentative", "Active", "Billing Pending", "Complete", "Cancelled"], key=f"create_job_status_{reset_counter}")
+    notes = st.text_area("Notes", key=f"create_job_notes_{reset_counter}")
 
     dates_preview = calc_job_dates(
         job_start_date,
@@ -451,13 +433,13 @@ with tab_jobs:
         f"Demob End: {format_date_value(dates_preview['demob_end_date'])}"
     )
 
-    if st.button("Create Job", key="create_job_submit"):
+    if st.button("Create Job", key=f"create_job_submit_{reset_counter}"):
         if not job_name:
             st.error("Job Name is required.")
         else:
             create_job(engine, {
                 "job_name": job_name,
-                "region_code": active_region_value(ACTIVE_REGION, region_code),
+                "region_code": ACTIVE_REGION if ACTIVE_REGION != "Global" else region_code,
                 "customer": customer,
                 "location": location,
                 "job_start_date": job_start_date,
@@ -468,17 +450,7 @@ with tab_jobs:
                 "notes": notes,
             })
             st.success("Created job.")
-            st.session_state["create_job_customer"] = ""
-            st.session_state["create_job_location"] = ""
-            st.session_state["create_job_name"] = ""
-            st.session_state["create_job_start_date"] = date.today()
-            st.session_state["create_job_duration"] = 7
-            st.session_state["create_job_mob"] = 3
-            st.session_state["create_job_demob"] = 2
-            st.session_state["create_job_status"] = "Planned"
-            st.session_state["create_job_notes"] = ""
-            if ACTIVE_REGION == "Global":
-                st.session_state["create_job_region"] = region_list[default_region_index]
+            st.session_state["create_job_reset_counter"] += 1
             st.rerun()
 
     jobs_df = filter_active_jobs_for_management(region_filter(get_jobs_df(engine), ACTIVE_REGION))
