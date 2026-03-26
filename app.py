@@ -234,16 +234,39 @@ with tab_pools:
         region_code = c1.selectbox("Region", regions_df["region_code"].tolist(), key="pool_region")
         selected_rc_display = c2.selectbox("Resource Class", rc_display["display"].tolist(), key="pool_rc")
         selected_rc = rc_display.loc[rc_display["display"] == selected_rc_display].iloc[0]
-        base_quantity = c3.number_input(f"Base Quantity ({selected_rc['unit_type']})", value=0.0, step=0.5)
+
+        # use text input and parse explicitly so we can see exactly what is being submitted
+        base_quantity_raw = c3.text_input(
+            f"Base Quantity ({selected_rc['unit_type']})",
+            value="0",
+            key="pool_base_quantity_raw",
+        )
+
         notes = st.text_input("Notes", key="pool_notes")
         submitted = st.form_submit_button("Save Pool Quantity")
 
         if submitted:
             try:
-                upsert_pool(engine, region_code, int(selected_rc["id"]), float(base_quantity), notes)
+                base_quantity = float(str(base_quantity_raw).replace(",", "").strip())
+
+                st.write("Submitted values:")
+                st.json(
+                    {
+                        "region_code": region_code,
+                        "resource_class_id": int(selected_rc["id"]),
+                        "class_name": selected_rc["class_name"],
+                        "base_quantity_raw": base_quantity_raw,
+                        "base_quantity_parsed": base_quantity,
+                        "unit_type": selected_rc["unit_type"],
+                    }
+                )
+
+                upsert_pool(engine, region_code, int(selected_rc["id"]), base_quantity, notes)
+
                 st.success(
                     f"Pool saved: {region_code} / {selected_rc['class_name']} / {base_quantity} {selected_rc['unit_type']}"
                 )
+
                 verify_df = query_df(
                     engine,
                     """
@@ -264,72 +287,16 @@ with tab_pools:
                         "resource_class_id": int(selected_rc["id"]),
                     },
                 )
+
                 st.write("Saved row check:")
                 st.dataframe(verify_df, use_container_width=True)
+
                 st.rerun()
+
+            except ValueError:
+                st.error("Base Quantity must be a valid number.")
             except Exception as e:
                 st.error(f"Pool save failed: {e}")
-
-    st.subheader("Pool Adjustment Log")
-    with st.form("pool_adjustment_form", clear_on_submit=True):
-        c1, c2, c3, c4 = st.columns(4)
-        adj_region = c1.selectbox("Region", regions_df["region_code"].tolist(), key="adj_region")
-        adj_rc_display = c2.selectbox("Resource Class", rc_display["display"].tolist(), key="adj_rc")
-        adj_rc = rc_display.loc[rc_display["display"] == adj_rc_display].iloc[0]
-        qty_change = c3.number_input(f"Quantity Change ({adj_rc['unit_type']})", value=0.0, step=0.5)
-        adjustment_date = c4.date_input("Adjustment Date", value=date.today())
-        st.caption(f"Selected: {adjustment_date.strftime('%m/%d/%Y')}")
-
-        c5, c6 = st.columns(2)
-        reason = c5.selectbox(
-            "Reason",
-            ["Purchase", "Transfer In", "Transfer Out", "Retirement", "Damage/Loss", "Correction"],
-        )
-        adj_notes = c6.text_input("Notes", key="adj_notes")
-        submitted = st.form_submit_button("Add Adjustment")
-
-        if submitted:
-            try:
-                add_pool_adjustment(
-                    engine,
-                    {
-                        "region_code": adj_region,
-                        "resource_class_id": int(adj_rc["id"]),
-                        "quantity_change": float(qty_change),
-                        "adjustment_date": adjustment_date,
-                        "reason": reason,
-                        "notes": adj_notes,
-                    },
-                )
-                st.success("Adjustment added.")
-                st.rerun()
-            except Exception as e:
-                st.error(f"Adjustment save failed: {e}")
-
-    as_of_date = st.date_input("Pool Snapshot As Of", value=date.today(), key="snapshot_date")
-    st.caption(f"Selected: {as_of_date.strftime('%m/%d/%Y')}")
-    snapshot = pool_snapshot_df(engine, as_of_date=as_of_date)
-    if snapshot.empty:
-        st.info("No pools set up yet.")
-    else:
-        st.dataframe(format_dates_for_display(snapshot), use_container_width=True)
-        snapshot_display = format_dates_for_display(snapshot)
-        csv_data = snapshot_display.to_csv(index=False).encode("utf-8")
-        excel_data = export_excel({"Pool Snapshot": snapshot_display})
-        c1, c2 = st.columns(2)
-        c1.download_button(
-            "Download Pool Snapshot CSV",
-            data=csv_data,
-            file_name=f"pool_snapshot_{as_of_date}.csv",
-            mime="text/csv",
-        )
-        c2.download_button(
-            "Download Pool Snapshot Excel",
-            data=excel_data,
-            file_name=f"pool_snapshot_{as_of_date}.xlsx",
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        )
-
 with tab_allocations:
     st.subheader("Allocations")
     req_summary = requirement_summary_df(engine)
