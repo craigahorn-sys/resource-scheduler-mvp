@@ -42,10 +42,22 @@ def load_lookups():
     jobs = get_jobs_df(engine)
     return regions, resource_classes, jobs
 
-def region_filter(df: pd.DataFrame, active_region: str) -> pd.DataFrame:
-    if df.empty or active_region == "Global" or "region_code" not in df.columns:
+def region_filter\(df: pd\.DataFrame, active_region: str\) -> pd\.DataFrame:
+    if df\.empty or active_region == "Global" or "region_code" not in df\.columns:
         return df
-    return df.loc[df["region_code"] == active_region].copy()
+    return df\.loc\[df\["region_code"\] == active_region\]\.copy\(\)
+
+
+def filter_active_jobs_for_management(df: pd.DataFrame) -> pd.DataFrame:
+    if df.empty:
+        return df
+    working = df.copy()
+    if "job_end_date" not in working.columns or "status" not in working.columns:
+        return working
+    cutoff = pd.Timestamp.today().normalize() - pd.Timedelta(days=120)
+    end_dates = pd.to_datetime(working["job_end_date"], errors="coerce")
+    is_old_completed = (working["status"] == "Complete") & (end_dates < cutoff)
+    return working.loc[~is_old_completed].copy()
 
 regions_df, resource_classes_df, jobs_df = load_lookups()
 
@@ -78,19 +90,32 @@ def render_jobs_manage_table(df: pd.DataFrame, active_region: str):
     if df.empty:
         st.info("No jobs yet.")
         return
-    hdr = st.columns([1.1, 1.4, 1.0, 1.1, 1.0, 0.9, 0.8])
-    for c, h in zip(hdr, ["Job Code", "Job Name", "Region", "Customer", "Start", "Status", "Manage"]):
+
+    show_region = active_region == "Global"
+    widths = [1.0, 1.1, 1.2, 1.4, 1.0, 1.0, 1.0, 1.0, 0.8] if show_region else [1.1, 1.2, 1.4, 1.0, 1.0, 1.0, 1.0, 0.8]
+    headers = ["Region", "Job Code", "Customer", "Job Name", "Mob Start", "Job Start", "Job End", "Demob End", "Manage"] if show_region else ["Job Code", "Customer", "Job Name", "Mob Start", "Job Start", "Job End", "Demob End", "Manage"]
+
+    hdr = st.columns(widths)
+    for c, h in zip(hdr, headers):
         c.markdown(f"**{h}**")
+
     region_codes = regions_df["region_code"].tolist()
+
     for _, row in df.iterrows():
-        cols = st.columns([1.1, 1.4, 1.0, 1.1, 1.0, 0.9, 0.8])
-        cols[0].write(str(row["job_code"]))
-        cols[1].write(str(row["job_name"]))
-        cols[2].write(region_format(str(row["region_code"])))
-        cols[3].write(str(row.get("customer", "") or ""))
-        cols[4].write(format_date_value(row["job_start_date"]))
-        cols[5].write(str(row["status"]))
-        with cols[6].popover("Edit/Delete", use_container_width=True):
+        cols = st.columns(widths)
+        col_idx = 0
+        if show_region:
+            cols[col_idx].write(region_format(str(row["region_code"])))
+            col_idx += 1
+        cols[col_idx].write(str(row["job_code"])); col_idx += 1
+        cols[col_idx].write(str(row.get("customer", "") or "")); col_idx += 1
+        cols[col_idx].write(str(row["job_name"])); col_idx += 1
+        cols[col_idx].write(format_date_value(row["mob_start_date"])); col_idx += 1
+        cols[col_idx].write(format_date_value(row["job_start_date"])); col_idx += 1
+        cols[col_idx].write(format_date_value(row["job_end_date"])); col_idx += 1
+        cols[col_idx].write(format_date_value(row["demob_end_date"])); col_idx += 1
+
+        with cols[col_idx].popover("Edit/Delete", use_container_width=True):
             region_idx = region_codes.index(row["region_code"])
             edit_customer = st.text_input("Customer", value=str(row.get("customer", "") or ""), key=f"job_customer_{row['id']}")
             edit_region = st.selectbox("Region", region_codes, index=region_idx, format_func=region_format, disabled=region_disabled(active_region), key=f"job_region_{row['id']}")
@@ -100,7 +125,7 @@ def render_jobs_manage_table(df: pd.DataFrame, active_region: str):
             edit_duration = st.number_input("Job Duration (days)", min_value=1, value=int(row["job_duration_days"]), step=1, key=f"job_duration_{row['id']}")
             edit_mob = st.number_input("Mobilization Days Before Job", min_value=0, value=int(row["mob_days_before_job"]), step=1, key=f"job_mob_{row['id']}")
             edit_demob = st.number_input("Demobilization Days After Job", min_value=0, value=int(row["demob_days_after_job"]), step=1, key=f"job_demob_{row['id']}")
-            statuses = ["Planned", "Tentative", "Active", "Complete", "Cancelled"]
+            statuses = ["Planned", "Tentative", "Active", "Billing Pending", "Complete", "Cancelled"]
             status_index = statuses.index(row["status"]) if row["status"] in statuses else 0
             edit_status = st.selectbox("Status", statuses, index=status_index, key=f"job_status_{row['id']}")
             edit_notes = st.text_area("Notes", value=str(row.get("notes", "") or ""), key=f"job_notes_{row['id']}")
@@ -203,6 +228,165 @@ def render_pools_manage_table(df: pd.DataFrame, active_region: str):
                 delete_pool(engine, int(row["id"]))
                 st.rerun()
 
+
+def week_start_label(ts: pd.Timestamp) -> str:
+    week_end = ts + pd.Timedelta(days=6)
+    return f"{ts.strftime('%b')} {ts.day}-{week_end.day if ts.month == week_end.month else week_end.strftime('%b %d')}"
+
+
+def build_planning_board_data(active_region: str, selected_class: str, start_date, num_weeks: int):
+    req = region_filter(requirement_summary_df(engine), active_region)
+    ful = region_filter(get_fulfillment_df(engine), active_region)
+    snapshot = region_filter(pool_snapshot_df(engine, as_of_date=start_date), active_region)
+
+    if req.empty:
+        return pd.DataFrame(), pd.DataFrame(), [], selected_class
+
+    class_names = req["class_name"].dropna().unique().tolist()
+    if not selected_class and class_names:
+        selected_class = class_names[0]
+
+    req = req.loc[req["class_name"] == selected_class].copy()
+    ful = ful.loc[ful["class_name"] == selected_class].copy() if not ful.empty else ful
+
+    start_ts = pd.to_datetime(start_date).normalize()
+    week_starts = [start_ts + pd.Timedelta(days=7*i) for i in range(num_weeks)]
+    week_labels = [week_start_label(ts) for ts in week_starts]
+    week_ranges = [(ts, ts + pd.Timedelta(days=6)) for ts in week_starts]
+
+    if req.empty:
+        return pd.DataFrame(), pd.DataFrame(), week_labels, selected_class
+
+    board_rows = []
+    for _, row in req.sort_values(["customer" if "customer" in req.columns else "job_name", "required_start"]).iterrows():
+        job_customer = row["job_name"]
+        if "job_name" in row.index:
+            job_customer = row["job_name"]
+        label = f"{row['job_name']} ({row['quantity_required']} {row['unit_type']})"
+        if "job_name" in row.index and "job_code" in row.index:
+            label = f"{row['job_code']} | {row['job_name']} | {row['quantity_required']} {row['unit_type']}"
+        rec = {
+            "group_label": str(row.get("job_name", "")),
+            "customer": str(row.get("job_name", "")),
+            "label": label,
+            "required_start": row["required_start"],
+            "required_end": row["required_end"],
+            "quantity_required": float(row["quantity_required"]),
+            "quantity_assigned": float(row["quantity_assigned"]),
+            "quantity_shortfall": float(row["quantity_shortfall"]),
+            "allocation_status": row["allocation_status"],
+        }
+        for wk_label, (wk_start, wk_end) in zip(week_labels, week_ranges):
+            overlaps = pd.to_datetime(row["required_start"]) <= wk_end and pd.to_datetime(row["required_end"]) >= wk_start
+            rec[wk_label] = label if overlaps else ""
+        board_rows.append(rec)
+
+    board_df = pd.DataFrame(board_rows)
+
+    summary_rows = []
+    for wk_label, (wk_start, wk_end) in zip(week_labels, week_ranges):
+        demand = 0.0
+        fulfilled = 0.0
+        shortfall = 0.0
+        for _, row in req.iterrows():
+            overlaps = pd.to_datetime(row["required_start"]) <= wk_end and pd.to_datetime(row["required_end"]) >= wk_start
+            if overlaps:
+                demand += float(row["quantity_required"])
+                fulfilled += float(row["quantity_assigned"])
+                shortfall += float(row["quantity_shortfall"])
+
+        pool_available = 0.0
+        if not snapshot.empty:
+            snap_match = snapshot.loc[snapshot["class_name"] == selected_class]
+            if not snap_match.empty:
+                pool_available = float(snap_match["available_quantity"].iloc[0])
+
+        summary_rows.append({
+            "metric": "Demand",
+            "week": wk_label,
+            "value": demand,
+        })
+        summary_rows.append({
+            "metric": "Fulfillment",
+            "week": wk_label,
+            "value": fulfilled,
+        })
+        summary_rows.append({
+            "metric": "Availability",
+            "week": wk_label,
+            "value": pool_available,
+        })
+        summary_rows.append({
+            "metric": "Shortfall",
+            "week": wk_label,
+            "value": shortfall,
+        })
+
+    summary_df = pd.DataFrame(summary_rows)
+    if not summary_df.empty:
+        summary_pivot = summary_df.pivot(index="metric", columns="week", values="value").reset_index()
+    else:
+        summary_pivot = pd.DataFrame()
+
+    return board_df, summary_pivot, week_labels, selected_class
+
+
+def render_planning_board(active_region: str):
+    st.subheader("Planning Board")
+    req_all = region_filter(requirement_summary_df(engine), active_region)
+    if req_all.empty:
+        st.info("No requirements yet.")
+        return
+
+    class_options = req_all["class_name"].dropna().unique().tolist()
+    class_options.sort()
+
+    c1, c2, c3 = st.columns([1.5, 1, 1])
+    selected_class = c1.selectbox("Resource View", class_options)
+    board_start = c2.date_input("Board Start", value=date.today(), key="board_start")
+    num_weeks = c3.selectbox("Weeks", [8, 10, 12, 16], index=2)
+
+    board_df, summary_df, week_labels, selected_class = build_planning_board_data(
+        active_region=active_region,
+        selected_class=selected_class,
+        start_date=board_start,
+        num_weeks=num_weeks,
+    )
+
+    if board_df.empty:
+        st.info("No rows for that resource view.")
+        return
+
+    display_cols = ["label"] + week_labels
+    board_display = board_df[display_cols].copy()
+    board_display = board_display.rename(columns={"label": "Job / Demand"})
+    st.dataframe(board_display, width="stretch", hide_index=True)
+
+    st.markdown("##### Weekly Summary")
+    if not summary_df.empty:
+        summary_display = summary_df.copy()
+        numeric_cols = [c for c in summary_display.columns if c != "metric"]
+        for col in numeric_cols:
+            summary_display[col] = summary_display[col].map(lambda x: "" if pd.isna(x) else f"{float(x):.3f}" if abs(float(x) - round(float(x))) > 1e-9 else f"{int(round(float(x)))}")
+        st.dataframe(summary_display, width="stretch", hide_index=True)
+
+    st.markdown("##### Chart")
+    chart_rows = []
+    for _, row in board_df.iterrows():
+        start = pd.to_datetime(row["required_start"])
+        end = pd.to_datetime(row["required_end"])
+        chart_rows.append({
+            "Task": row["label"],
+            "Start": start,
+            "Finish": end,
+            "Status": row["allocation_status"],
+        })
+    chart_df = pd.DataFrame(chart_rows)
+    if not chart_df.empty:
+        fig = px.timeline(chart_df, x_start="Start", x_end="Finish", y="Task", color="Status")
+        fig.update_yaxes(autorange="reversed")
+        st.plotly_chart(fig, width="stretch")
+
 with st.sidebar:
     st.header("Workspace")
     region_options = ["Global"] + regions_df["region_code"].tolist()
@@ -213,8 +397,8 @@ with st.sidebar:
         st.success("Rebalanced")
         st.rerun()
 
-tab_jobs, tab_requirements, tab_pools, tab_allocations, tab_calendar, tab_gantt = st.tabs(
-    ["Jobs", "Requirements", "Pools", "Allocations", "Calendar", "Gantt"]
+tab_jobs, tab_requirements, tab_pools, tab_allocations, tab_planning, tab_calendar, tab_gantt = st.tabs(
+    ["Jobs", "Requirements", "Pools", "Allocations", "Planning Board", "Calendar", "Gantt"]
 )
 
 with tab_jobs:
@@ -235,7 +419,7 @@ with tab_jobs:
         with c3:
             mob_days_before_job = st.number_input("Mobilization Days Before Job", min_value=0, value=3, step=1)
             demob_days_after_job = st.number_input("Demobilization Days After Job", min_value=0, value=2, step=1)
-            status = st.selectbox("Status", ["Planned", "Tentative", "Active", "Complete", "Cancelled"])
+            status = st.selectbox("Status", ["Planned", "Tentative", "Active", "Billing Pending", "Complete", "Cancelled"])
         notes = st.text_area("Notes")
         dates_preview = calc_job_dates(job_start_date, int(job_duration_days), int(mob_days_before_job), int(demob_days_after_job))
         st.info(f"Job End: {format_date_value(dates_preview['job_end_date'])}  |  Mob Start: {format_date_value(dates_preview['mob_start_date'])}  |  Demob End: {format_date_value(dates_preview['demob_end_date'])}")
@@ -255,15 +439,8 @@ with tab_jobs:
             st.success("Created job.")
             st.rerun()
 
-    st.subheader("Jobs")
-    jobs_df = region_filter(get_jobs_df(engine), ACTIVE_REGION)
-    if jobs_df.empty:
-        st.info("No jobs yet.")
-    else:
-        display_jobs = format_dates_for_display(jobs_df[["job_code","job_name","region_code","customer","location","job_start_date","job_end_date","mob_start_date","demob_end_date","status"]])
-        display_jobs["region_code"] = display_jobs["region_code"].map(lambda x: region_format(str(x)))
-        st.dataframe(display_jobs, width="stretch")
-        render_jobs_manage_table(jobs_df, ACTIVE_REGION)
+    jobs_df = filter_active_jobs_for_management(region_filter(get_jobs_df(engine), ACTIVE_REGION))
+    render_jobs_manage_table(jobs_df, ACTIVE_REGION)
 
 with tab_requirements:
     st.subheader("Add Requirement")
@@ -399,6 +576,10 @@ with tab_allocations:
         display_dbg = format_dates_for_display(dbg.copy())
         display_dbg["region_code"] = display_dbg["region_code"].map(lambda x: region_format(str(x)))
         st.dataframe(display_dbg, width="stretch")
+
+
+with tab_planning:
+    render_planning_board(ACTIVE_REGION)
 
 with tab_calendar:
     st.subheader("Calendar")
