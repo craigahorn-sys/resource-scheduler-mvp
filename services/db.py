@@ -8,9 +8,7 @@ import pandas as pd
 import streamlit as st
 from sqlalchemy import create_engine, text
 
-# db.py lives in services/, so parent = services/, parent.parent = project root
-# where schema.sql is deployed alongside app.py.
-SCHEMA_PATH = Path(__file__).resolve().parent.parent / "schema.sql"
+SCHEMA_PATH = Path(__file__).resolve().parent.parent / 'schema.sql'
 
 RESOURCE_CLASSES = [
     ('6" Layflat Hose', 'Hose', 'miles', 'quantity_only'), ('8" Layflat Hose', 'Hose', 'miles', 'quantity_only'),
@@ -32,7 +30,7 @@ RESOURCE_CLASSES = [
     ('750 Air Compressor', 'Air', 'units', 'quantity_then_specific'), ('900 Air Compressor', 'Air', 'units', 'quantity_then_specific'),
     ('1200 Air Compressor', 'Air', 'units', 'quantity_then_specific'), ('Doghouses', 'Support', 'units', 'quantity_then_specific'),
     ('Rental Pump Placeholder', 'Rental', 'units', 'quantity_then_specific'), ('Rental Truck Placeholder', 'Rental', 'units', 'quantity_then_specific'),
-    ('Rental Filter Pod Placeholder', 'Rental', 'units', 'quantity_then_specific'),
+    ('Rental Filter Pod Placeholder', 'Rental', 'units', 'quantity_then_specific')
 ]
 
 REGIONS = [('RM', 'Rockies', True), ('PM', 'Permian', True), ('ST', 'South Texas', True)]
@@ -43,12 +41,7 @@ def get_engine():
         conn = st.connection('sql', type='sql')
         return conn.engine
     except Exception:
-        url = os.getenv('DATABASE_URL')
-        if not url:
-            # FIX: use an absolute path for the SQLite fallback so the DB file
-            # location is deterministic regardless of the working directory.
-            db_path = Path(__file__).resolve().parent.parent / "resource_scheduler.db"
-            url = f"sqlite:///{db_path}"
+        url = os.getenv('DATABASE_URL') or 'sqlite:///resource_scheduler.db'
         return create_engine(url, future=True)
 
 
@@ -64,37 +57,27 @@ def init_db(engine):
     _run_schema(engine)
     with engine.begin() as conn:
         for code, name, active in REGIONS:
-            conn.execute(
-                text(
-                    """
-                    INSERT INTO regions(region_code, region_name, active)
-                    VALUES (:code, :name, :active)
-                    ON CONFLICT (region_code) DO UPDATE
-                    SET region_name = EXCLUDED.region_name,
-                        active = EXCLUDED.active
-                    """
-                ),
-                {'code': code, 'name': name, 'active': active},
-            )
+            conn.execute(text("""
+                INSERT INTO regions(region_code, region_name, active)
+                VALUES (:code, :name, :active)
+                ON CONFLICT (region_code) DO UPDATE
+                SET region_name = EXCLUDED.region_name,
+                    active = EXCLUDED.active
+            """), {'code': code, 'name': name, 'active': active})
         for class_name, category, unit_type, planning_mode in RESOURCE_CLASSES:
-            conn.execute(
-                text(
-                    """
-                    INSERT INTO resource_classes(class_name, category, unit_type, planning_mode)
-                    VALUES (:class_name, :category, :unit_type, :planning_mode)
-                    ON CONFLICT (class_name) DO UPDATE
-                    SET category = EXCLUDED.category,
-                        unit_type = EXCLUDED.unit_type,
-                        planning_mode = EXCLUDED.planning_mode
-                    """
-                ),
-                {
-                    'class_name': class_name,
-                    'category': category,
-                    'unit_type': unit_type,
-                    'planning_mode': planning_mode,
-                },
-            )
+            conn.execute(text("""
+                INSERT INTO resource_classes(class_name, category, unit_type, planning_mode)
+                VALUES (:class_name, :category, :unit_type, :planning_mode)
+                ON CONFLICT (class_name) DO UPDATE
+                SET category = EXCLUDED.category,
+                    unit_type = EXCLUDED.unit_type,
+                    planning_mode = EXCLUDED.planning_mode
+            """), {
+                'class_name': class_name,
+                'category': category,
+                'unit_type': unit_type,
+                'planning_mode': planning_mode,
+            })
 
 
 def query_df(engine, sql: str, params: dict | None = None) -> pd.DataFrame:
