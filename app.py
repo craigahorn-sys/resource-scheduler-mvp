@@ -42,10 +42,10 @@ def load_lookups():
     jobs = get_jobs_df(engine)
     return regions, resource_classes, jobs
 
-def region_filter\(df: pd\.DataFrame, active_region: str\) -> pd\.DataFrame:
-    if df\.empty or active_region == "Global" or "region_code" not in df\.columns:
+def region_filter(df: pd.DataFrame, active_region: str) -> pd.DataFrame:
+    if df.empty or active_region == "Global" or "region_code" not in df.columns:
         return df
-    return df\.loc\[df\["region_code"\] == active_region\]\.copy\(\)
+    return df.loc[df["region_code"] == active_region].copy()
 
 
 def filter_active_jobs_for_management(df: pd.DataFrame) -> pd.DataFrame:
