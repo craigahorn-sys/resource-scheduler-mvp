@@ -173,12 +173,8 @@ with tab_requirements:
 
             req_notes = st.text_area("Notes")
 
-            req_start = pd.to_datetime(selected_job["job_start_date"]).date() - pd.Timedelta(
-                days=int(days_before_job_start)
-            )
-            req_end = pd.to_datetime(selected_job["job_end_date"]).date() + pd.Timedelta(
-                days=int(days_after_job_end)
-            )
+            req_start = pd.to_datetime(selected_job["job_start_date"]).date() - pd.Timedelta(days=int(days_before_job_start))
+            req_end = pd.to_datetime(selected_job["job_end_date"]).date() + pd.Timedelta(days=int(days_after_job_end))
             st.info(f"Requirement Window: {format_date_value(req_start)} to {format_date_value(req_end)}")
 
             submitted = st.form_submit_button("Add Requirement")
@@ -245,11 +241,9 @@ with tab_pools:
         if submitted:
             try:
                 upsert_pool(engine, region_code, int(selected_rc["id"]), float(base_quantity), notes)
-
                 st.success(
                     f"Pool saved: {region_code} / {selected_rc['class_name']} / {base_quantity} {selected_rc['unit_type']}"
                 )
-
                 verify_df = query_df(
                     engine,
                     """
@@ -270,12 +264,9 @@ with tab_pools:
                         "resource_class_id": int(selected_rc["id"]),
                     },
                 )
-
                 st.write("Saved row check:")
                 st.dataframe(verify_df, use_container_width=True)
-
                 st.rerun()
-
             except Exception as e:
                 st.error(f"Pool save failed: {e}")
 
@@ -410,6 +401,7 @@ with tab_calendar:
                             "total_pool",
                             "committed_quantity",
                             "available_quantity",
+                            "pool_status",
                         ]
                     ]
                 ),
