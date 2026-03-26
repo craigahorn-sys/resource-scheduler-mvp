@@ -202,25 +202,46 @@ def render_pools_manage_table(df: pd.DataFrame, active_region: str):
     if df.empty:
         st.info("No pool rows yet.")
         return
-    hdr = st.columns([1.0, 1.3, 0.8, 1.0, 0.8])
-    for c, h in zip(hdr, ["Region", "Class", "Pool", "Status", "Manage"]):
+
+    hdr = st.columns([1.0, 1.4, 0.9, 0.9, 0.9, 1.0, 0.8])
+    for c, h in zip(hdr, ["Region", "Class", "Pool Total", "Committed", "Available", "Status", "Manage"]):
         c.markdown(f"**{h}**")
+
     region_codes = regions_df["region_code"].tolist()
     base_pool_df = get_pools_df(engine)
     rc_df = resource_options_df()
+
     for _, row in df.iterrows():
-        cols = st.columns([1.0, 1.3, 0.8, 1.0, 0.8])
+        cols = st.columns([1.0, 1.4, 0.9, 0.9, 0.9, 1.0, 0.8])
         cols[0].write(region_format(str(row["region_code"])))
         cols[1].write(str(row["class_name"]))
         cols[2].write(str(row["total_pool"]))
-        cols[3].write(str(row["pool_status"]))
+        cols[3].write(str(row["committed_quantity"]))
+        cols[4].write(str(row["available_quantity"]))
+        cols[5].write(str(row["pool_status"]))
+
         rc_match = rc_df.loc[rc_df["class_name"] == row["class_name"]].iloc[0]
         step = quantity_step(str(rc_match["unit_type"]), str(rc_match["category"]))
         fmt = quantity_format(str(rc_match["unit_type"]), str(rc_match["category"]))
-        with cols[4].popover("Edit/Delete", use_container_width=True):
+
+        with cols[6].popover("Edit/Delete", use_container_width=True):
             region_idx = region_codes.index(row["region_code"])
-            edit_region = st.selectbox("Region", region_codes, index=region_idx, format_func=region_format, disabled=region_disabled(active_region), key=f"pool_region_{row['id']}")
-            edit_qty = st.number_input("Base Quantity", min_value=0.0, value=float(row["base_quantity"]), step=step, format=fmt, key=f"pool_qty_{row['id']}")
+            edit_region = st.selectbox(
+                "Region",
+                region_codes,
+                index=region_idx,
+                format_func=region_format,
+                disabled=region_disabled(active_region),
+                key=f"pool_region_{row['id']}",
+            )
+            edit_qty = st.number_input(
+                "Base Quantity",
+                min_value=0.0,
+                value=float(row["base_quantity"]),
+                step=step,
+                format=fmt,
+                key=f"pool_qty_{row['id']}",
+            )
             pool_row = base_pool_df.loc[base_pool_df["id"] == row["id"]].iloc[0]
             edit_notes = st.text_input("Notes", value=str(pool_row.get("notes", "") or ""), key=f"pool_notes_{row['id']}")
             a, b = st.columns(2)
@@ -230,146 +251,6 @@ def render_pools_manage_table(df: pd.DataFrame, active_region: str):
             if b.button("Delete", key=f"delete_pool_{row['id']}"):
                 delete_pool(engine, int(row["id"]))
                 st.rerun()
-
-
-def week_start_label(ts: pd.Timestamp) -> str:
-    week_end = ts + pd.Timedelta(days=6)
-    if ts.month == week_end.month:
-        return f"{ts.strftime('%b')} {ts.day}-{week_end.day}"
-    return f"{ts.strftime('%b')} {ts.day}-{week_end.strftime('%b')} {week_end.day}"
-
-
-def build_planning_board_data(active_region: str, selected_class: str | None, start_date, num_weeks: int):
-    req = region_filter(requirement_summary_df(engine), active_region)
-    ful = region_filter(get_fulfillment_df(engine), active_region)
-    snapshot = region_filter(pool_snapshot_df(engine, as_of_date=start_date), active_region)
-
-    if req.empty:
-        return pd.DataFrame(), pd.DataFrame(), [], ""
-
-    class_options = req["class_name"].dropna().astype(str).unique().tolist()
-    if not class_options:
-        return pd.DataFrame(), pd.DataFrame(), [], ""
-    if not selected_class or selected_class not in class_options:
-        selected_class = class_options[0]
-
-    req = req.loc[req["class_name"] == selected_class].copy()
-    ful = ful.loc[ful["class_name"] == selected_class].copy() if not ful.empty else ful
-
-    start_ts = pd.to_datetime(start_date).normalize()
-    week_starts = [start_ts + pd.Timedelta(days=7 * i) for i in range(num_weeks)]
-    week_ranges = [(ts, ts + pd.Timedelta(days=6)) for ts in week_starts]
-    week_labels = [week_start_label(ts) for ts in week_starts]
-
-    if req.empty:
-        return pd.DataFrame(), pd.DataFrame(), week_labels, selected_class
-
-    board_rows = []
-    for _, row in req.sort_values(["job_name", "required_start", "job_code"]).iterrows():
-        label = f"{row['job_code']} | {row['job_name']} | {row['quantity_required']} {row['unit_type']}"
-        board_row = {
-            "job_code": row["job_code"],
-            "job_name": row["job_name"],
-            "label": label,
-            "required_start": row["required_start"],
-            "required_end": row["required_end"],
-            "quantity_required": float(row["quantity_required"]),
-            "quantity_assigned": float(row["quantity_assigned"]),
-            "quantity_shortfall": float(row["quantity_shortfall"]),
-            "allocation_status": row["allocation_status"],
-        }
-        for week_label, (wk_start, wk_end) in zip(week_labels, week_ranges):
-            overlaps = pd.to_datetime(row["required_start"]) <= wk_end and pd.to_datetime(row["required_end"]) >= wk_start
-            board_row[week_label] = label if overlaps else ""
-        board_rows.append(board_row)
-
-    board_df = pd.DataFrame(board_rows)
-
-    summary_rows = []
-    for week_label, (wk_start, wk_end) in zip(week_labels, week_ranges):
-        demand = 0.0
-        fulfilled = 0.0
-        shortfall = 0.0
-        for _, row in req.iterrows():
-            overlaps = pd.to_datetime(row["required_start"]) <= wk_end and pd.to_datetime(row["required_end"]) >= wk_start
-            if overlaps:
-                demand += float(row["quantity_required"])
-                fulfilled += float(row["quantity_assigned"])
-                shortfall += float(row["quantity_shortfall"])
-
-        availability = 0.0
-        if not snapshot.empty:
-            snap_match = snapshot.loc[snapshot["class_name"] == selected_class]
-            if not snap_match.empty:
-                availability = float(snap_match["available_quantity"].iloc[0])
-
-        summary_rows.append({"Metric": "Demand", "Week": week_label, "Value": demand})
-        summary_rows.append({"Metric": "Fulfillment", "Week": week_label, "Value": fulfilled})
-        summary_rows.append({"Metric": "Availability", "Week": week_label, "Value": availability})
-        summary_rows.append({"Metric": "Shortfall", "Week": week_label, "Value": shortfall})
-
-    summary_df = pd.DataFrame(summary_rows)
-    summary_pivot = summary_df.pivot(index="Metric", columns="Week", values="Value").reset_index() if not summary_df.empty else pd.DataFrame()
-
-    return board_df, summary_pivot, week_labels, selected_class
-
-
-def render_planning_board(active_region: str):
-    st.subheader("Planning Board")
-    req_all = region_filter(requirement_summary_df(engine), active_region)
-    if req_all.empty:
-        st.info("No requirements yet.")
-        return
-
-    class_options = req_all["class_name"].dropna().astype(str).unique().tolist()
-    class_options.sort()
-
-    c1, c2, c3 = st.columns([1.5, 1, 1])
-    selected_class = c1.selectbox("Resource View", class_options, key="planning_class")
-    board_start = c2.date_input("Board Start", value=date.today(), key="planning_start")
-    num_weeks = c3.selectbox("Weeks", [8, 10, 12, 16], index=2, key="planning_weeks")
-
-    board_df, summary_df, week_labels, selected_class = build_planning_board_data(
-        active_region=active_region,
-        selected_class=selected_class,
-        start_date=board_start,
-        num_weeks=num_weeks,
-    )
-
-    if board_df.empty:
-        st.info("No rows for that resource view.")
-        return
-
-    board_display = board_df[["label"] + week_labels].copy()
-    board_display = board_display.rename(columns={"label": "Job / Demand"})
-    st.dataframe(board_display, width="stretch", hide_index=True)
-
-    st.markdown("##### Weekly Summary")
-    if not summary_df.empty:
-        summary_display = summary_df.copy()
-        for col in summary_display.columns:
-            if col != "Metric":
-                summary_display[col] = summary_display[col].map(
-                    lambda x: "" if pd.isna(x) else (f"{float(x):.3f}" if abs(float(x) - round(float(x))) > 1e-9 else f"{int(round(float(x)))}")
-                )
-        st.dataframe(summary_display, width="stretch", hide_index=True)
-
-    st.markdown("##### Timeline")
-    chart_rows = []
-    for _, row in board_df.iterrows():
-        chart_rows.append(
-            {
-                "Task": row["label"],
-                "Start": pd.to_datetime(row["required_start"]),
-                "Finish": pd.to_datetime(row["required_end"]),
-                "Status": row["allocation_status"],
-            }
-        )
-    chart_df = pd.DataFrame(chart_rows)
-    if not chart_df.empty:
-        fig = px.timeline(chart_df, x_start="Start", x_end="Finish", y="Task", color="Status")
-        fig.update_yaxes(autorange="reversed")
-        st.plotly_chart(fig, width="stretch")
 
 with st.sidebar:
     st.header("Workspace")
@@ -564,19 +445,53 @@ with tab_pools:
     rc_display = resource_options_df()
     region_codes = regions_df["region_code"].tolist()
     default_region_index = region_default_index(region_codes, ACTIVE_REGION)
-    with st.form("upsert_pool_form"):
-        c1, c2, c3 = st.columns(3)
-        region_code = c1.selectbox("Region", region_codes, index=default_region_index, format_func=region_format, disabled=region_disabled(ACTIVE_REGION), key=f"pool_region_{ACTIVE_REGION}")
-        selected_rc_display = c2.selectbox("Resource Class", rc_display["display"].tolist(), key=f"pool_rc_{ACTIVE_REGION}")
-        selected_rc = rc_display.loc[rc_display["display"] == selected_rc_display].iloc[0]
-        step = quantity_step(str(selected_rc["unit_type"]), str(selected_rc["category"]))
-        fmt = quantity_format(str(selected_rc["unit_type"]), str(selected_rc["category"]))
-        base_quantity = c3.number_input(f"Base Quantity ({selected_rc['unit_type']})", min_value=0.0, value=0.0, step=step, format=fmt, key=f"pool_base_quantity_{ACTIVE_REGION}")
-        notes = st.text_input("Notes", key=f"pool_notes_{ACTIVE_REGION}")
-        if st.form_submit_button("Save Pool Quantity"):
-            upsert_pool(engine, active_region_value(ACTIVE_REGION, region_code), int(selected_rc["id"]), float(base_quantity), notes)
-            st.success("Pool saved.")
-            st.rerun()
+
+    if "create_pool_reset_counter" not in st.session_state:
+        st.session_state["create_pool_reset_counter"] = 0
+    pool_reset_counter = st.session_state["create_pool_reset_counter"]
+    pool_key_suffix = f"{ACTIVE_REGION}_{pool_reset_counter}"
+
+    c1, c2, c3 = st.columns(3)
+    region_code = c1.selectbox(
+        "Region",
+        region_codes,
+        index=default_region_index,
+        format_func=region_format,
+        disabled=region_disabled(ACTIVE_REGION),
+        key=f"pool_region_{pool_key_suffix}",
+    )
+    selected_rc_display = c2.selectbox(
+        "Resource Class",
+        rc_display["display"].tolist(),
+        key=f"pool_rc_{pool_key_suffix}",
+    )
+    selected_rc = rc_display.loc[rc_display["display"] == selected_rc_display].iloc[0]
+
+    step = quantity_step(str(selected_rc["unit_type"]), str(selected_rc["category"]))
+    fmt = quantity_format(str(selected_rc["unit_type"]), str(selected_rc["category"]))
+
+    base_quantity = c3.number_input(
+        f"Base Quantity ({selected_rc['unit_type']})",
+        min_value=0.0,
+        value=0.0,
+        step=step,
+        format=fmt,
+        key=f"pool_base_quantity_{pool_key_suffix}",
+    )
+
+    notes = st.text_input("Notes", key=f"pool_notes_{pool_key_suffix}")
+
+    if st.button("Save Pool Quantity", key=f"pool_submit_{pool_key_suffix}"):
+        upsert_pool(
+            engine,
+            ACTIVE_REGION if ACTIVE_REGION != "Global" else region_code,
+            int(selected_rc["id"]),
+            float(base_quantity),
+            notes,
+        )
+        st.success("Pool saved.")
+        st.session_state["create_pool_reset_counter"] += 1
+        st.rerun()
 
     st.subheader("Pool Adjustment Log")
     with st.form("pool_adjustment_form", clear_on_submit=True):
