@@ -197,27 +197,30 @@ def render_requirements_manage_table(df: pd.DataFrame):
                 delete_requirement(engine, int(row["id"]))
                 st.rerun()
 
+
 def render_pools_manage_table(df: pd.DataFrame, active_region: str):
     st.markdown("##### Manage Pools")
     if df.empty:
         st.info("No pool rows yet.")
         return
-    hdr = st.columns([1.0, 1.3, 0.8, 1.0, 0.8])
-    for c, h in zip(hdr, ["Region", "Class", "Pool", "Status", "Manage"]):
+    hdr = st.columns([1.0, 1.3, 0.8, 0.8, 0.8, 1.0, 0.8])
+    for c, h in zip(hdr, ["Region", "Class", "Pool Total", "Committed", "Available", "Status", "Manage"]):
         c.markdown(f"**{h}**")
     region_codes = regions_df["region_code"].tolist()
     base_pool_df = get_pools_df(engine)
     rc_df = resource_options_df()
     for _, row in df.iterrows():
-        cols = st.columns([1.0, 1.3, 0.8, 1.0, 0.8])
+        cols = st.columns([1.0, 1.3, 0.8, 0.8, 0.8, 1.0, 0.8])
         cols[0].write(region_format(str(row["region_code"])))
         cols[1].write(str(row["class_name"]))
         cols[2].write(str(row["total_pool"]))
-        cols[3].write(str(row["pool_status"]))
+        cols[3].write(str(row["committed_quantity"]))
+        cols[4].write(str(row["available_quantity"]))
+        cols[5].write(str(row["pool_status"]))
         rc_match = rc_df.loc[rc_df["class_name"] == row["class_name"]].iloc[0]
         step = quantity_step(str(rc_match["unit_type"]), str(rc_match["category"]))
         fmt = quantity_format(str(rc_match["unit_type"]), str(rc_match["category"]))
-        with cols[4].popover("Edit/Delete", use_container_width=True):
+        with cols[6].popover("Edit/Delete", use_container_width=True):
             region_idx = region_codes.index(row["region_code"])
             edit_region = st.selectbox("Region", region_codes, index=region_idx, format_func=region_format, disabled=region_disabled(active_region), key=f"pool_region_{row['id']}")
             edit_qty = st.number_input("Base Quantity", min_value=0.0, value=float(row["base_quantity"]), step=step, format=fmt, key=f"pool_qty_{row['id']}")
@@ -230,7 +233,6 @@ def render_pools_manage_table(df: pd.DataFrame, active_region: str):
             if b.button("Delete", key=f"delete_pool_{row['id']}"):
                 delete_pool(engine, int(row["id"]))
                 st.rerun()
-
 
 def week_start_label(ts: pd.Timestamp) -> str:
     week_end = ts + pd.Timedelta(days=6)
