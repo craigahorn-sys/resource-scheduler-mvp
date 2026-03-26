@@ -231,43 +231,42 @@ def render_pools_manage_table(df: pd.DataFrame, active_region: str):
 
 def week_start_label(ts: pd.Timestamp) -> str:
     week_end = ts + pd.Timedelta(days=6)
-    return f"{ts.strftime('%b')} {ts.day}-{week_end.day if ts.month == week_end.month else week_end.strftime('%b %d')}"
+    if ts.month == week_end.month:
+        return f"{ts.strftime('%b')} {ts.day}-{week_end.day}"
+    return f"{ts.strftime('%b')} {ts.day}-{week_end.strftime('%b')} {week_end.day}"
 
 
-def build_planning_board_data(active_region: str, selected_class: str, start_date, num_weeks: int):
+def build_planning_board_data(active_region: str, selected_class: str | None, start_date, num_weeks: int):
     req = region_filter(requirement_summary_df(engine), active_region)
     ful = region_filter(get_fulfillment_df(engine), active_region)
     snapshot = region_filter(pool_snapshot_df(engine, as_of_date=start_date), active_region)
 
     if req.empty:
-        return pd.DataFrame(), pd.DataFrame(), [], selected_class
+        return pd.DataFrame(), pd.DataFrame(), [], ""
 
-    class_names = req["class_name"].dropna().unique().tolist()
-    if not selected_class and class_names:
-        selected_class = class_names[0]
+    class_options = req["class_name"].dropna().astype(str).unique().tolist()
+    if not class_options:
+        return pd.DataFrame(), pd.DataFrame(), [], ""
+    if not selected_class or selected_class not in class_options:
+        selected_class = class_options[0]
 
     req = req.loc[req["class_name"] == selected_class].copy()
     ful = ful.loc[ful["class_name"] == selected_class].copy() if not ful.empty else ful
 
     start_ts = pd.to_datetime(start_date).normalize()
-    week_starts = [start_ts + pd.Timedelta(days=7*i) for i in range(num_weeks)]
-    week_labels = [week_start_label(ts) for ts in week_starts]
+    week_starts = [start_ts + pd.Timedelta(days=7 * i) for i in range(num_weeks)]
     week_ranges = [(ts, ts + pd.Timedelta(days=6)) for ts in week_starts]
+    week_labels = [week_start_label(ts) for ts in week_starts]
 
     if req.empty:
         return pd.DataFrame(), pd.DataFrame(), week_labels, selected_class
 
     board_rows = []
-    for _, row in req.sort_values(["customer" if "customer" in req.columns else "job_name", "required_start"]).iterrows():
-        job_customer = row["job_name"]
-        if "job_name" in row.index:
-            job_customer = row["job_name"]
-        label = f"{row['job_name']} ({row['quantity_required']} {row['unit_type']})"
-        if "job_name" in row.index and "job_code" in row.index:
-            label = f"{row['job_code']} | {row['job_name']} | {row['quantity_required']} {row['unit_type']}"
-        rec = {
-            "group_label": str(row.get("job_name", "")),
-            "customer": str(row.get("job_name", "")),
+    for _, row in req.sort_values(["job_name", "required_start", "job_code"]).iterrows():
+        label = f"{row['job_code']} | {row['job_name']} | {row['quantity_required']} {row['unit_type']}"
+        board_row = {
+            "job_code": row["job_code"],
+            "job_name": row["job_name"],
             "label": label,
             "required_start": row["required_start"],
             "required_end": row["required_end"],
@@ -276,15 +275,15 @@ def build_planning_board_data(active_region: str, selected_class: str, start_dat
             "quantity_shortfall": float(row["quantity_shortfall"]),
             "allocation_status": row["allocation_status"],
         }
-        for wk_label, (wk_start, wk_end) in zip(week_labels, week_ranges):
+        for week_label, (wk_start, wk_end) in zip(week_labels, week_ranges):
             overlaps = pd.to_datetime(row["required_start"]) <= wk_end and pd.to_datetime(row["required_end"]) >= wk_start
-            rec[wk_label] = label if overlaps else ""
-        board_rows.append(rec)
+            board_row[week_label] = label if overlaps else ""
+        board_rows.append(board_row)
 
     board_df = pd.DataFrame(board_rows)
 
     summary_rows = []
-    for wk_label, (wk_start, wk_end) in zip(week_labels, week_ranges):
+    for week_label, (wk_start, wk_end) in zip(week_labels, week_ranges):
         demand = 0.0
         fulfilled = 0.0
         shortfall = 0.0
@@ -295,38 +294,19 @@ def build_planning_board_data(active_region: str, selected_class: str, start_dat
                 fulfilled += float(row["quantity_assigned"])
                 shortfall += float(row["quantity_shortfall"])
 
-        pool_available = 0.0
+        availability = 0.0
         if not snapshot.empty:
             snap_match = snapshot.loc[snapshot["class_name"] == selected_class]
             if not snap_match.empty:
-                pool_available = float(snap_match["available_quantity"].iloc[0])
+                availability = float(snap_match["available_quantity"].iloc[0])
 
-        summary_rows.append({
-            "metric": "Demand",
-            "week": wk_label,
-            "value": demand,
-        })
-        summary_rows.append({
-            "metric": "Fulfillment",
-            "week": wk_label,
-            "value": fulfilled,
-        })
-        summary_rows.append({
-            "metric": "Availability",
-            "week": wk_label,
-            "value": pool_available,
-        })
-        summary_rows.append({
-            "metric": "Shortfall",
-            "week": wk_label,
-            "value": shortfall,
-        })
+        summary_rows.append({"Metric": "Demand", "Week": week_label, "Value": demand})
+        summary_rows.append({"Metric": "Fulfillment", "Week": week_label, "Value": fulfilled})
+        summary_rows.append({"Metric": "Availability", "Week": week_label, "Value": availability})
+        summary_rows.append({"Metric": "Shortfall", "Week": week_label, "Value": shortfall})
 
     summary_df = pd.DataFrame(summary_rows)
-    if not summary_df.empty:
-        summary_pivot = summary_df.pivot(index="metric", columns="week", values="value").reset_index()
-    else:
-        summary_pivot = pd.DataFrame()
+    summary_pivot = summary_df.pivot(index="Metric", columns="Week", values="Value").reset_index() if not summary_df.empty else pd.DataFrame()
 
     return board_df, summary_pivot, week_labels, selected_class
 
@@ -338,13 +318,13 @@ def render_planning_board(active_region: str):
         st.info("No requirements yet.")
         return
 
-    class_options = req_all["class_name"].dropna().unique().tolist()
+    class_options = req_all["class_name"].dropna().astype(str).unique().tolist()
     class_options.sort()
 
     c1, c2, c3 = st.columns([1.5, 1, 1])
-    selected_class = c1.selectbox("Resource View", class_options)
-    board_start = c2.date_input("Board Start", value=date.today(), key="board_start")
-    num_weeks = c3.selectbox("Weeks", [8, 10, 12, 16], index=2)
+    selected_class = c1.selectbox("Resource View", class_options, key="planning_class")
+    board_start = c2.date_input("Board Start", value=date.today(), key="planning_start")
+    num_weeks = c3.selectbox("Weeks", [8, 10, 12, 16], index=2, key="planning_weeks")
 
     board_df, summary_df, week_labels, selected_class = build_planning_board_data(
         active_region=active_region,
@@ -357,30 +337,31 @@ def render_planning_board(active_region: str):
         st.info("No rows for that resource view.")
         return
 
-    display_cols = ["label"] + week_labels
-    board_display = board_df[display_cols].copy()
+    board_display = board_df[["label"] + week_labels].copy()
     board_display = board_display.rename(columns={"label": "Job / Demand"})
     st.dataframe(board_display, width="stretch", hide_index=True)
 
     st.markdown("##### Weekly Summary")
     if not summary_df.empty:
         summary_display = summary_df.copy()
-        numeric_cols = [c for c in summary_display.columns if c != "metric"]
-        for col in numeric_cols:
-            summary_display[col] = summary_display[col].map(lambda x: "" if pd.isna(x) else f"{float(x):.3f}" if abs(float(x) - round(float(x))) > 1e-9 else f"{int(round(float(x)))}")
+        for col in summary_display.columns:
+            if col != "Metric":
+                summary_display[col] = summary_display[col].map(
+                    lambda x: "" if pd.isna(x) else (f"{float(x):.3f}" if abs(float(x) - round(float(x))) > 1e-9 else f"{int(round(float(x)))}")
+                )
         st.dataframe(summary_display, width="stretch", hide_index=True)
 
-    st.markdown("##### Chart")
+    st.markdown("##### Timeline")
     chart_rows = []
     for _, row in board_df.iterrows():
-        start = pd.to_datetime(row["required_start"])
-        end = pd.to_datetime(row["required_end"])
-        chart_rows.append({
-            "Task": row["label"],
-            "Start": start,
-            "Finish": end,
-            "Status": row["allocation_status"],
-        })
+        chart_rows.append(
+            {
+                "Task": row["label"],
+                "Start": pd.to_datetime(row["required_start"]),
+                "Finish": pd.to_datetime(row["required_end"]),
+                "Status": row["allocation_status"],
+            }
+        )
     chart_df = pd.DataFrame(chart_rows)
     if not chart_df.empty:
         fig = px.timeline(chart_df, x_start="Start", x_end="Finish", y="Task", color="Status")
