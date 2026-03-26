@@ -1,61 +1,44 @@
 
 import streamlit as st
-from services.db import get_engine, init_db, query_df, execute
-from services.scheduler import *
+from services.db import get_engine, init_db, query_df
+from services.scheduler import create_job, create_requirement, upsert_pool, recalc_all_requirements
 
-engine=get_engine()
+engine = get_engine()
 init_db(engine)
 
-regions=["Global","RM","PM","ST"]
-
-with st.sidebar:
-    region=st.selectbox("Region",regions)
-
-def filt(df):
-    if region=="Global": return df
-    if "region_code" not in df.columns: return df
-    return df[df.region_code==region]
+st.sidebar.header("Region")
+region = st.sidebar.selectbox("Region", ["Global","RM","PM","ST"])
 
 st.title("Scheduler")
 
-# Jobs
-st.header("Jobs")
-name=st.text_input("Job name")
-if st.button("Create Job"):
-    create_job(engine,name,"RM")
-    st.rerun()
-
-jobs=filt(query_df(engine,"SELECT * FROM jobs"))
-st.dataframe(jobs)
-
-if not jobs.empty:
-    jid=st.selectbox("Delete Job",jobs.id)
-    if st.button("Delete Job"):
-        delete_job(engine,jid)
-        st.rerun()
-
-# Pools
 st.header("Pools")
-qty=st.number_input("Pool Qty",0.0)
+qty = st.number_input("Qty",0.0)
 if st.button("Save Pool"):
     upsert_pool(engine,"RM",1,qty)
-    st.rerun()
 
-# Requirements
+st.header("Jobs")
+job = st.text_input("Job Name")
+if st.button("Create Job"):
+    create_job(engine,{
+        "job_name":job,
+        "region_code":"RM",
+        "job_start_date":"2026-01-01",
+        "job_duration_days":5,
+        "mob_days_before_job":1,
+        "demob_days_after_job":1,
+        "status":"Planned"
+    })
+
 st.header("Requirements")
-if st.button("Add Requirement"):
-    create_requirement(engine,1,1,5)
-    st.rerun()
+if st.button("Add Req"):
+    create_requirement(engine,{
+        "job_id":1,
+        "resource_class_id":1,
+        "quantity_required":5,
+        "days_before_job_start":0,
+        "days_after_job_end":0,
+        "priority":"Normal"
+    })
 
-req=query_df(engine,"SELECT * FROM job_requirements")
-st.dataframe(req)
-
-if not req.empty:
-    rid=st.selectbox("Delete Requirement",req.id)
-    if st.button("Delete Requirement"):
-        delete_requirement(engine,rid)
-        st.rerun()
-
-# Allocation
-st.header("Allocation")
+st.header("Data")
 st.dataframe(query_df(engine,"SELECT * FROM requirement_fulfillment"))
