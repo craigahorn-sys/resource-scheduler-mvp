@@ -28,6 +28,15 @@ st.caption("PostgreSQL-ready Streamlit MVP with duration-based scheduling and au
 engine = get_engine()
 init_db(engine)
 
+try:
+    query_df(engine, "SELECT customer_color FROM jobs LIMIT 1")
+except Exception:
+    try:
+        from services.db import execute
+        execute(engine, "ALTER TABLE jobs ADD COLUMN customer_color TEXT")
+    except Exception:
+        pass
+
 
 def format_date_value(value):
     if pd.isna(value):
@@ -59,6 +68,24 @@ def load_lookups():
 regions_df, resource_classes_df, jobs_df = load_lookups()
 
 
+
+
+def format_compact_number(val):
+    try:
+        f = float(val)
+    except Exception:
+        return val
+    if abs(f - round(f)) < 1e-9:
+        return str(int(round(f)))
+    return f"{f:.3f}".rstrip("0").rstrip(".")
+
+
+def availability_font_color(val):
+    try:
+        f = float(val)
+    except Exception:
+        return "#1b4f9b"
+    return "#1f7a1f" if f >= 0 else "#b22222"
 def week_start_label(ts: pd.Timestamp) -> str:
     week_end = ts + pd.Timedelta(days=6)
     if ts.month == week_end.month:
@@ -101,10 +128,16 @@ def build_integrated_planner_data(selected_class: str | None, start_date, num_we
 
     jobs_lookup = get_jobs_df(engine)
     if not jobs_lookup.empty and "customer" in jobs_lookup.columns:
-        req = req.merge(jobs_lookup[["job_code", "customer"]].drop_duplicates(), on="job_code", how="left")
+        merge_cols = ["job_code", "customer"]
+        if "customer_color" in jobs_lookup.columns:
+            merge_cols.append("customer_color")
+        req = req.merge(jobs_lookup[merge_cols].drop_duplicates(), on="job_code", how="left")
     else:
         req["customer"] = ""
+    if "customer_color" not in req.columns:
+        req["customer_color"] = ""
     req["customer"] = req["customer"].fillna("").replace("", "Unassigned")
+    req["customer_color"] = req["customer_color"].fillna("")
 
     start_ts = pd.to_datetime(start_date).normalize()
     week_starts = [start_ts + pd.Timedelta(days=7 * i) for i in range(num_weeks)]
@@ -152,9 +185,10 @@ def build_integrated_planner_data(selected_class: str | None, start_date, num_we
             if not snap_match.empty:
                 availability = float(snap_match["available_quantity"].iloc[0])
 
+        in_region = availability + fulfilled
         summary_rows.extend([
-            {"Metric": "Demand", "Week": week_label, "WeekStart": week_start, "Value": demand},
-            {"Metric": "Fulfillment", "Week": week_label, "WeekStart": week_start, "Value": fulfilled},
+            {"Metric": "Need", "Week": week_label, "WeekStart": week_start, "Value": demand},
+            {"Metric": "In Region", "Week": week_label, "WeekStart": week_start, "Value": in_region},
             {"Metric": "Availability", "Week": week_label, "WeekStart": week_start, "Value": availability},
             {"Metric": "Shortfall", "Week": week_label, "WeekStart": week_start, "Value": shortfall},
         ])
@@ -188,7 +222,7 @@ def render_integrated_planning_board():
         st.info("No rows for that resource view.")
         return
 
-    summary_metrics = ["Demand", "Fulfillment", "Availability", "Shortfall"]
+    summary_metrics = ["Need", "In Region", "Availability", "Shortfall"]
     total_job_rows = len(board_df)
     total_rows = total_job_rows + 1 + len(summary_metrics)
 
@@ -214,7 +248,7 @@ def render_integrated_planning_board():
         y = total_job_rows - i
         row_positions.append(y)
         row_labels.append(str(row["customer"]))
-        base = customer_base_color(str(row["customer"]))
+        base = str(row.get("customer_color", "") or "") or customer_base_color(str(row["customer"]))
         factor = 0.86 + 0.12 * (int(row["customer_job_index"]) % 4)
         fill = shade_hex(base, factor)
 
@@ -243,8 +277,8 @@ def render_integrated_planning_board():
         )
 
     summary_y = {
-        "Demand": 4,
-        "Fulfillment": 3,
+        "Need": 4,
+        "In Region": 3,
         "Availability": 2,
         "Shortfall": 1,
     }
@@ -258,14 +292,25 @@ def render_integrated_planning_board():
             y = summary_y[rec["Metric"]]
             x = pd.to_datetime(rec["WeekStart"]) + pd.Timedelta(days=3.5)
             val = float(rec["Value"])
-            txt = f"{val:.3f}" if abs(val - round(val)) > 1e-9 else f"{int(round(val))}"
-            color = "#9b1c1c" if rec["Metric"] in ["Demand", "Shortfall"] else "#1b4f9b"
+            txt = format_compact_number(val)
+            if rec["Metric"] == "Availability":
+                color = availability_font_color(val)
+                font_size = 14
+                font_family = "Arial Black"
+            elif rec["Metric"] in ["Need", "Shortfall"]:
+                color = "#9b1c1c"
+                font_size = 12
+                font_family = "Arial"
+            else:
+                color = "#1b4f9b"
+                font_size = 12
+                font_family = "Arial"
             fig.add_annotation(
                 x=x,
                 y=y,
                 text=txt,
                 showarrow=False,
-                font=dict(size=12, color=color),
+                font=dict(size=font_size, color=color, family=font_family),
                 xanchor="center",
                 yanchor="middle",
             )
@@ -304,7 +349,24 @@ def render_integrated_planning_board():
         plot_bgcolor="white",
         paper_bgcolor="white",
     )
-    st.plotly_chart(fig, width="stretch")
+    fig.update_xaxes(fixedrange=True)
+    fig.update_yaxes(fixedrange=True)
+    st.plotly_chart(
+        fig,
+        width="stretch",
+        config={
+            "displayModeBar": True,
+            "displaylogo": False,
+            "modeBarButtons": [["toImage"]],
+            "toImageButtonOptions": {
+                "format": "png",
+                "filename": "planning_board",
+                "height": 1200,
+                "width": 2200,
+                "scale": 2,
+            },
+        },
+    )
 
 
 tab_jobs, tab_requirements, tab_pools, tab_allocations, tab_planning, tab_calendar, tab_gantt = st.tabs(
@@ -323,6 +385,7 @@ with tab_jobs:
                 format_func=lambda x: f"{x} - {regions_df.loc[regions_df.region_code.eq(x), 'region_name'].iloc[0]}",
             )
             customer = st.text_input("Customer")
+            customer_color = st.color_picker("Customer Color", "#1f77b4")
         with c2:
             location = st.text_input("Location")
             job_start_date = st.date_input("Job Start Date", value=date.today())
@@ -353,6 +416,7 @@ with tab_jobs:
                         "job_name": job_name,
                         "region_code": region_code,
                         "customer": customer,
+                        "customer_color": customer_color,
                         "location": location,
                         "job_start_date": job_start_date,
                         "job_duration_days": int(job_duration_days),
