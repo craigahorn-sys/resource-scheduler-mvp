@@ -3,6 +3,8 @@ from __future__ import annotations
 from datetime import date
 import pandas as pd
 import plotly.express as px
+import plotly.graph_objects as go
+import colorsys
 import streamlit as st
 
 from services.db import export_excel, get_engine, init_db, query_df
@@ -20,6 +22,16 @@ st.caption("Priority-based scheduling with region-scoped workflow and pop-up row
 
 engine = get_engine()
 init_db(engine)
+
+try:
+    query_df(engine, "SELECT customer_color FROM jobs LIMIT 1")
+except Exception:
+    try:
+        from services.db import execute
+        execute(engine, "ALTER TABLE jobs ADD COLUMN customer_color TEXT")
+    except Exception:
+        pass
+
 
 if "create_job_start_date" not in st.session_state:
     st.session_state["create_job_start_date"] = date.today()
@@ -121,6 +133,7 @@ def render_jobs_manage_table(df: pd.DataFrame, active_region: str):
         with cols[col_idx].popover("Edit/Delete", use_container_width=True):
             region_idx = region_codes.index(row["region_code"])
             edit_customer = st.text_input("Customer", value=str(row.get("customer", "") or ""), key=f"job_customer_{row['id']}")
+            edit_customer_color = st.color_picker("Customer Color", value=str(row.get("customer_color", "") or "#1f77b4"), key=f"job_customer_color_{row['id']}")
             edit_region = st.selectbox("Region", region_codes, index=region_idx, format_func=region_format, disabled=region_disabled(active_region), key=f"job_region_{row['id']}")
             edit_job_name = st.text_input("Job Name", value=str(row["job_name"]), key=f"job_name_{row['id']}")
             edit_location = st.text_input("Location", value=str(row.get("location", "") or ""), key=f"job_loc_{row['id']}")
@@ -138,6 +151,7 @@ def render_jobs_manage_table(df: pd.DataFrame, active_region: str):
                     "job_name": edit_job_name,
                     "region_code": active_region_value(active_region, edit_region),
                     "customer": edit_customer,
+                    "customer_color": edit_customer_color,
                     "location": edit_location,
                     "job_start_date": edit_start,
                     "job_duration_days": int(edit_duration),
@@ -234,6 +248,47 @@ def render_pools_manage_table(df: pd.DataFrame, active_region: str):
                 delete_pool(engine, int(row["id"]))
                 st.rerun()
 
+
+
+def format_compact_number(val):
+    try:
+        f = float(val)
+    except Exception:
+        return str(val)
+    if abs(f - round(f)) < 1e-9:
+        return str(int(round(f)))
+    s = f"{f:.3f}".rstrip("0").rstrip(".")
+    return "0" if s == "-0" else s
+
+
+def availability_font_color(val):
+    try:
+        f = float(val)
+    except Exception:
+        return "#1b4f9b"
+    return "#1f7a1f" if f >= 0 else "#b22222"
+
+
+def customer_base_color(customer: str) -> str:
+    palette = [
+        "#1f77b4", "#d62728", "#2ca02c", "#9467bd", "#ff7f0e",
+        "#17becf", "#e377c2", "#8c564b", "#bcbd22", "#7f7f7f",
+    ]
+    idx = abs(hash(customer)) % len(palette)
+    return palette[idx]
+
+
+def shade_hex(hex_color: str, factor: float) -> str:
+    hex_color = str(hex_color or "").lstrip("#")
+    if len(hex_color) != 6:
+        hex_color = customer_base_color("fallback").lstrip("#")
+    r = int(hex_color[0:2], 16) / 255.0
+    g = int(hex_color[2:4], 16) / 255.0
+    b = int(hex_color[4:6], 16) / 255.0
+    h, l, s = colorsys.rgb_to_hls(r, g, b)
+    l = max(0.28, min(0.78, l * factor))
+    r2, g2, b2 = colorsys.hls_to_rgb(h, l, s)
+    return f"#{int(r2*255):02x}{int(g2*255):02x}{int(b2*255):02x}"
 def week_start_label(ts: pd.Timestamp) -> str:
     week_end = ts + pd.Timedelta(days=6)
     if ts.month == week_end.month:
@@ -243,8 +298,6 @@ def week_start_label(ts: pd.Timestamp) -> str:
 
 def build_planning_board_data(active_region: str, selected_class: str | None, start_date, num_weeks: int):
     req = region_filter(requirement_summary_df(engine), active_region)
-    snapshot = region_filter(pool_snapshot_df(engine, as_of_date=start_date), active_region)
-
     if req.empty:
         return pd.DataFrame(), pd.DataFrame(), [], [], ""
 
@@ -256,76 +309,78 @@ def build_planning_board_data(active_region: str, selected_class: str | None, st
 
     req = req.loc[req["class_name"] == selected_class].copy()
 
+    jobs_lookup = region_filter(get_jobs_df(engine), active_region)
+    if not jobs_lookup.empty and "customer" in jobs_lookup.columns:
+        merge_cols = ["job_code", "customer"]
+        if "customer_color" in jobs_lookup.columns:
+            merge_cols.append("customer_color")
+        req = req.merge(jobs_lookup[merge_cols].drop_duplicates(), on="job_code", how="left")
+    else:
+        req["customer"] = ""
+    if "customer_color" not in req.columns:
+        req["customer_color"] = ""
+
+    req["customer"] = req["customer"].fillna("").replace("", "Unassigned")
+    req["customer_color"] = req["customer_color"].fillna("")
+
     start_ts = pd.to_datetime(start_date).normalize()
     week_starts = [start_ts + pd.Timedelta(days=7 * i) for i in range(num_weeks)]
     week_ranges = [(ts, ts + pd.Timedelta(days=6)) for ts in week_starts]
     week_labels = [week_start_label(ts) for ts in week_starts]
-    week_map = dict(zip(week_labels, week_starts))
 
-    if req.empty:
-        return pd.DataFrame(), pd.DataFrame(), week_labels, week_starts, selected_class
-
-    # Prefer customer if available in jobs data, otherwise fall back to job name
-    jobs_lookup = get_jobs_df(engine)[["job_code", "customer"]].drop_duplicates() if not get_jobs_df(engine).empty and "customer" in get_jobs_df(engine).columns else pd.DataFrame()
-    if not jobs_lookup.empty:
-        req = req.merge(jobs_lookup, on="job_code", how="left")
-    else:
-        req["customer"] = ""
-
-    board_rows = []
-    for _, row in req.sort_values(["customer", "job_name", "required_start", "job_code"]).iterrows():
+    rows = []
+    customer_job_index = {}
+    for _, row in req.sort_values(["customer", "required_start", "job_name", "job_code"]).iterrows():
         customer = str(row.get("customer", "") or "Unassigned")
-        label = f"{customer}, {row['job_name']}, {row['quantity_required']} {row['unit_type']}"
-        board_rows.append(
+        customer_job_index[customer] = customer_job_index.get(customer, -1) + 1
+        rows.append(
             {
                 "customer": customer,
+                "customer_color": str(row.get("customer_color", "") or ""),
                 "job_code": row["job_code"],
                 "job_name": row["job_name"],
-                "label": label,
-                "required_start": row["required_start"],
-                "required_end": row["required_end"],
+                "label": f"{row['job_name']}, {format_compact_number(row['quantity_required'])} {row['unit_type']}",
+                "required_start": pd.to_datetime(row["required_start"]),
+                "required_end": pd.to_datetime(row["required_end"]),
                 "quantity_required": float(row["quantity_required"]),
                 "quantity_assigned": float(row["quantity_assigned"]),
                 "quantity_shortfall": float(row["quantity_shortfall"]),
                 "allocation_status": row["allocation_status"],
                 "unit_type": row["unit_type"],
+                "customer_job_index": customer_job_index[customer],
             }
         )
-
-    board_df = pd.DataFrame(board_rows)
+    board_df = pd.DataFrame(rows)
 
     summary_rows = []
     for week_label, week_start, (wk_start, wk_end) in zip(week_labels, week_starts, week_ranges):
-        demand = 0.0
-        fulfilled = 0.0
-        shortfall = 0.0
+        need = in_region = shortfall = 0.0
 
         for _, row in req.iterrows():
             overlaps = pd.to_datetime(row["required_start"]) <= wk_end and pd.to_datetime(row["required_end"]) >= wk_start
             if overlaps:
-                demand += float(row["quantity_required"])
-                fulfilled += float(row["quantity_assigned"])
+                need += float(row["quantity_required"])
+                in_region += float(row["quantity_assigned"])
                 shortfall += float(row["quantity_shortfall"])
 
+        snap = region_filter(pool_snapshot_df(engine, as_of_date=wk_start.date()), active_region)
         availability = 0.0
-        if not snapshot.empty:
-            snap_match = snapshot.loc[snapshot["class_name"] == selected_class]
+        total_pool = 0.0
+        if not snap.empty:
+            snap_match = snap.loc[snap["class_name"] == selected_class]
             if not snap_match.empty:
                 availability = float(snap_match["available_quantity"].iloc[0])
+                total_pool = float(snap_match["total_pool"].iloc[0])
 
-        summary_rows.append({"Metric": "Demand", "Week": week_label, "WeekStart": week_start, "Value": demand})
-        summary_rows.append({"Metric": "Fulfillment", "Week": week_label, "WeekStart": week_start, "Value": fulfilled})
-        summary_rows.append({"Metric": "Availability", "Week": week_label, "WeekStart": week_start, "Value": availability})
-        summary_rows.append({"Metric": "Shortfall", "Week": week_label, "WeekStart": week_start, "Value": shortfall})
+        summary_rows.extend([
+            {"Metric": "Need", "Week": week_label, "WeekStart": week_start, "Value": need},
+            {"Metric": "In Region", "Week": week_label, "WeekStart": week_start, "Value": total_pool},
+            {"Metric": "Availability", "Week": week_label, "WeekStart": week_start, "Value": availability},
+            {"Metric": "Shortfall", "Week": week_label, "WeekStart": week_start, "Value": shortfall},
+        ])
 
     summary_df = pd.DataFrame(summary_rows)
-    if not summary_df.empty:
-        summary_pivot = summary_df.pivot(index="Metric", columns="Week", values="Value")
-        summary_pivot = summary_pivot.reindex(columns=week_labels).reset_index()
-    else:
-        summary_pivot = pd.DataFrame()
-
-    return board_df, summary_pivot, week_labels, week_starts, selected_class
+    return board_df, summary_df, week_labels, week_starts, selected_class
 
 
 def render_planning_board(active_region: str):
@@ -354,77 +409,139 @@ def render_planning_board(active_region: str):
         st.info("No rows for that resource view.")
         return
 
-    # Compact grouped planner rows
-    st.markdown("##### Job Demand Planner")
-    display_df = board_df[["customer", "job_code", "job_name", "quantity_required", "unit_type", "required_start", "required_end", "allocation_status"]].copy()
-    display_df["Demand"] = display_df["quantity_required"].astype(str) + " " + display_df["unit_type"].astype(str)
-    display_df = display_df.rename(
-        columns={
-            "customer": "Customer",
-            "job_code": "Job Code",
-            "job_name": "Job Name",
-            "required_start": "Start",
-            "required_end": "End",
-            "allocation_status": "Status",
-        }
-    )
-    display_df = format_dates_for_display(display_df[["Customer", "Job Code", "Job Name", "Demand", "Start", "End", "Status"]])
-    st.dataframe(display_df, width="stretch", hide_index=True)
+    summary_metrics = ["Need", "In Region", "Availability", "Shortfall"]
+    total_job_rows = len(board_df)
+    total_rows = total_job_rows + 1 + len(summary_metrics)
 
-    st.markdown("##### Weekly Summary")
+    fig = go.Figure()
+    x0 = pd.to_datetime(week_starts[0])
+    x_end = pd.to_datetime(week_starts[-1]) + pd.Timedelta(days=7)
+
+    for ws in week_starts + [x_end]:
+        fig.add_vline(x=ws, line_width=1, line_color="rgba(120,120,120,0.40)")
+    for y in [i + 0.5 for i in range(total_rows + 1)]:
+        width = 2 if abs(y - (len(summary_metrics) + 0.5)) < 1e-9 else 1
+        color = "rgba(90,90,90,0.55)" if width == 2 else "rgba(160,160,160,0.28)"
+        fig.add_hline(y=y, line_width=width, line_color=color)
+
+    row_positions = []
+    row_labels = []
+
+    for i, (_, row) in enumerate(board_df.iterrows()):
+        y = total_rows - i
+        row_positions.append(y)
+        row_labels.append(str(row["customer"]))
+
+        base = str(row.get("customer_color", "") or "") or customer_base_color(str(row["customer"]))
+        factor = 0.86 + 0.12 * (int(row["customer_job_index"]) % 4)
+        fill = shade_hex(base, factor)
+
+        start = pd.to_datetime(row["required_start"])
+        finish = pd.to_datetime(row["required_end"]) + pd.Timedelta(days=1)
+
+        fig.add_shape(
+            type="rect",
+            x0=start,
+            x1=finish,
+            y0=y - 0.34,
+            y1=y + 0.34,
+            line=dict(color=fill, width=1),
+            fillcolor=fill,
+            layer="below",
+        )
+        fig.add_annotation(
+            x=start + (finish - start) / 2,
+            y=y,
+            text=str(row["label"]),
+            showarrow=False,
+            font=dict(size=11, color="black"),
+            xanchor="center",
+            yanchor="middle",
+        )
+
+    summary_y = {"Need": 4, "In Region": 3, "Availability": 2, "Shortfall": 1}
+    for metric, y in summary_y.items():
+        row_positions.append(y)
+        row_labels.append(metric)
+
     if not summary_df.empty:
-        summary_display = summary_df.copy()
-        for col in summary_display.columns:
-            if col != "Metric":
-                summary_display[col] = summary_display[col].map(
-                    lambda x: "" if pd.isna(x) else (f"{float(x):.3f}" if abs(float(x) - round(float(x))) > 1e-9 else f"{int(round(float(x)))}")
-                )
-        st.dataframe(summary_display, width="stretch", hide_index=True)
+        for _, rec in summary_df.iterrows():
+            y = summary_y[rec["Metric"]]
+            x = pd.to_datetime(rec["WeekStart"]) + pd.Timedelta(days=3.5)
+            val = float(rec["Value"])
+            txt = format_compact_number(val)
 
-    st.markdown("##### Gantt View")
-    gantt_df = board_df.copy()
-    gantt_df["Start"] = pd.to_datetime(gantt_df["required_start"])
-    gantt_df["Finish"] = pd.to_datetime(gantt_df["required_end"])
-    gantt_df["Task"] = gantt_df.apply(
-        lambda r: f"{r['customer']}, {r['job_name']}, {r['quantity_required']} {r['unit_type']}",
-        axis=1,
+            if rec["Metric"] == "Availability":
+                color = availability_font_color(val)
+                font = dict(size=14, color=color, family="Arial Black")
+            elif rec["Metric"] in ["Need", "Shortfall"]:
+                color = "#9b1c1c"
+                font = dict(size=12, color=color)
+            else:
+                color = "#1b4f9b"
+                font = dict(size=12, color=color)
+
+            fig.add_annotation(
+                x=x,
+                y=y,
+                text=txt,
+                showarrow=False,
+                font=font,
+                xanchor="center",
+                yanchor="middle",
+            )
+
+    fig.add_trace(go.Scatter(
+        x=[x0, x_end],
+        y=[0, total_rows + 1],
+        mode="markers",
+        marker_opacity=0,
+        hoverinfo="skip",
+        showlegend=False,
+    ))
+
+    fig.update_xaxes(
+        tickmode="array",
+        tickvals=week_starts,
+        ticktext=week_labels,
+        side="top",
+        showgrid=False,
+        range=[x0, x_end],
+        tickfont=dict(size=11),
+        fixedrange=True,
     )
-    gantt_df["Color Group"] = gantt_df["customer"].fillna("Unassigned")
-
-    fig = px.timeline(
-        gantt_df,
-        x_start="Start",
-        x_end="Finish",
-        y="Task",
-        color="Color Group",
-        hover_data={
-            "customer": True,
-            "job_name": True,
-            "quantity_required": True,
-            "quantity_assigned": True,
-            "quantity_shortfall": True,
-            "allocation_status": True,
-            "Start": True,
-            "Finish": True,
-            "Color Group": False,
-            "Task": False,
+    fig.update_yaxes(
+        tickmode="array",
+        tickvals=row_positions,
+        ticktext=row_labels,
+        range=[0.5, total_rows + 0.5],
+        showgrid=False,
+        zeroline=False,
+        tickfont=dict(size=12),
+        fixedrange=True,
+    )
+    fig.update_layout(
+        height=max(520, 120 + total_rows * 50),
+        margin=dict(l=30, r=20, t=30, b=20),
+        plot_bgcolor="white",
+        paper_bgcolor="white",
+    )
+    st.plotly_chart(
+        fig,
+        width="stretch",
+        config={
+            "displayModeBar": True,
+            "displaylogo": False,
+            "modeBarButtons": [["toImage"]],
+            "toImageButtonOptions": {
+                "format": "png",
+                "filename": "planning_board",
+                "height": 1200,
+                "width": 2200,
+                "scale": 2,
+            },
         },
     )
-    fig.update_yaxes(autorange="reversed")
-    fig.update_layout(
-        height=max(400, 70 + 42 * len(gantt_df)),
-        bargap=0.28,
-        margin=dict(l=20, r=20, t=20, b=20),
-        legend_title_text="Customer",
-        xaxis=dict(
-            tickmode="array",
-            tickvals=week_starts,
-            ticktext=week_labels,
-            showgrid=True,
-        ),
-    )
-    fig.update_traces(text=gantt_df["Task"], textposition="inside")
-    st.plotly_chart(fig, width="stretch")
 
 with st.sidebar:
     st.header("Workspace")
@@ -462,6 +579,7 @@ with tab_jobs:
     c1, c2, c3 = st.columns(3)
     with c1:
         customer = st.text_input("Customer", key=f"create_job_customer_{region_key_suffix}")
+        customer_color = st.color_picker("Customer Color", value="#1f77b4", key=f"create_job_customer_color_{region_key_suffix}")
         region_code = st.selectbox(
             "Region",
             region_list,
@@ -502,6 +620,7 @@ with tab_jobs:
                 "job_name": job_name,
                 "region_code": ACTIVE_REGION if ACTIVE_REGION != "Global" else region_code,
                 "customer": customer,
+                "customer_color": customer_color,
                 "location": location,
                 "job_start_date": job_start_date,
                 "job_duration_days": int(job_duration_days),
