@@ -1,7 +1,8 @@
 def recalc_all_requirements(engine):
     # TEMP: basic safe implementation so app boots
     return
-
+def recalc_all_requirements(engine):
+    pass
 
 def add_pool_adjustment(engine, data):
     return
