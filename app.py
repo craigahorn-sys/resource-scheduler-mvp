@@ -380,7 +380,6 @@ def build_planning_board_data(active_region: str, selected_class: str | None, st
             {"Metric": "Need", "Week": week_label, "WeekStart": week_start, "Value": need},
             {"Metric": "In Region", "Week": week_label, "WeekStart": week_start, "Value": total_pool},
             {"Metric": "Availability", "Week": week_label, "WeekStart": week_start, "Value": availability},
-            {"Metric": "Shortfall", "Week": week_label, "WeekStart": week_start, "Value": shortfall},
         ])
 
     summary_df = pd.DataFrame(summary_rows)
@@ -413,7 +412,7 @@ def render_planning_board(active_region: str):
         st.info("No rows for that resource view.")
         return
 
-    summary_metrics = ["Need", "In Region", "Availability", "Shortfall"]
+    summary_metrics = ["Need", "In Region", "Availability"]
     total_job_rows = len(board_df)
     total_rows = total_job_rows + 1 + len(summary_metrics)
 
@@ -463,7 +462,7 @@ def render_planning_board(active_region: str):
             yanchor="middle",
         )
 
-    summary_y = {"Need": 4, "In Region": 3, "Availability": 2, "Shortfall": 1}
+    summary_y = {"Need": 3, "In Region": 2, "Availability": 1}
     for metric, y in summary_y.items():
         row_positions.append(y)
         row_labels.append(metric)
