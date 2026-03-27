@@ -1,7 +1,6 @@
+
 from __future__ import annotations
-
 from datetime import date
-
 import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
@@ -11,29 +10,36 @@ import streamlit as st
 from services.db import export_excel, get_engine, init_db, query_df
 from services.models import calc_job_dates
 from services.scheduler import (
-    add_pool_adjustment,
-    create_job,
-    create_requirement,
-    get_fulfillment_df,
-    get_jobs_df,
-    pool_snapshot_df,
-    requirement_summary_df,
-    upsert_pool,
+    add_pool_adjustment, allocation_debug_df, create_job, create_requirement, delete_job,
+    delete_pool, delete_pool_adjustment, delete_requirement, get_fulfillment_df,
+    get_jobs_df, get_pools_df, pool_snapshot_df, recalc_all_requirements,
+    requirement_summary_df, update_job, update_requirement, upsert_pool,
 )
 
 st.set_page_config(page_title="Resource Scheduler V2", layout="wide")
 st.title("Resource Scheduler V2")
-st.caption("PostgreSQL-ready Streamlit MVP with duration-based scheduling and auto-allocation from internal pools.")
+st.caption("Priority-based scheduling with region-scoped workflow and pop-up row management.")
 
 engine = get_engine()
 init_db(engine)
 
+try:
+    query_df(engine, "SELECT customer_color FROM jobs LIMIT 1")
+except Exception:
+    try:
+        from services.db import execute
+        execute(engine, "ALTER TABLE jobs ADD COLUMN customer_color TEXT")
+    except Exception:
+        pass
+
+
+if "create_job_start_date" not in st.session_state:
+    st.session_state["create_job_start_date"] = date.today()
 
 def format_date_value(value):
     if pd.isna(value):
         return ""
     return pd.to_datetime(value).strftime("%m/%d/%Y")
-
 
 def format_dates_for_display(df: pd.DataFrame) -> pd.DataFrame:
     formatted = df.copy()
@@ -45,25 +51,222 @@ def format_dates_for_display(df: pd.DataFrame) -> pd.DataFrame:
                 pass
     return formatted
 
-
 def load_lookups():
     regions = query_df(engine, "SELECT region_code, region_name FROM regions WHERE active = TRUE ORDER BY region_code")
-    resource_classes = query_df(
-        engine,
-        "SELECT id, class_name, category, unit_type, planning_mode FROM resource_classes ORDER BY category, class_name",
-    )
+    resource_classes = query_df(engine, "SELECT id, class_name, category, unit_type, planning_mode FROM resource_classes ORDER BY id")
     jobs = get_jobs_df(engine)
     return regions, resource_classes, jobs
 
+def region_filter(df: pd.DataFrame, active_region: str) -> pd.DataFrame:
+    if df.empty or active_region == "Global" or "region_code" not in df.columns:
+        return df
+    return df.loc[df["region_code"] == active_region].copy()
+
+
+def filter_active_jobs_for_management(df: pd.DataFrame) -> pd.DataFrame:
+    if df.empty:
+        return df
+    working = df.copy()
+    if "job_end_date" not in working.columns or "status" not in working.columns:
+        return working
+    cutoff = pd.Timestamp.today().normalize() - pd.Timedelta(days=120)
+    end_dates = pd.to_datetime(working["job_end_date"], errors="coerce")
+    is_old_completed = (working["status"] == "Complete") & (end_dates < cutoff)
+    return working.loc[~is_old_completed].copy()
 
 regions_df, resource_classes_df, jobs_df = load_lookups()
 
+def region_format(code: str) -> str:
+    match = regions_df.loc[regions_df["region_code"] == code, "region_name"]
+    return code if match.empty else f"{code} - {match.iloc[0]}"
 
-def week_start_label(ts: pd.Timestamp) -> str:
-    week_end = ts + pd.Timedelta(days=6)
-    if ts.month == week_end.month:
-        return f"{ts.strftime('%b')} {ts.day}-{week_end.day}"
-    return f"{ts.strftime('%b')} {ts.day}-{week_end.strftime('%b')} {week_end.day}"
+def active_region_value(selected: str, widget_value: str) -> str:
+    return widget_value if selected == "Global" else selected
+
+def region_default_index(region_codes: list[str], active_region: str) -> int:
+    return region_codes.index(active_region) if active_region != "Global" and active_region in region_codes else 0
+
+def region_disabled(active_region: str) -> bool:
+    return active_region != "Global"
+
+def quantity_step(unit_type: str, category: str) -> float:
+    return 0.125 if category == "Hose" or unit_type == "miles" else 1.0
+
+def quantity_format(unit_type: str, category: str) -> str:
+    return "%.3f" if quantity_step(unit_type, category) == 0.125 else "%.0f"
+
+def resource_options_df() -> pd.DataFrame:
+    rc = resource_classes_df.copy()
+    rc["display"] = rc["class_name"]
+    return rc
+
+def render_jobs_manage_table(df: pd.DataFrame, active_region: str):
+    st.markdown("##### Manage Jobs")
+    if df.empty:
+        st.info("No jobs yet.")
+        return
+
+    show_region = active_region == "Global"
+    widths = [1.0, 1.1, 1.2, 1.4, 1.0, 1.0, 1.0, 1.0, 0.8] if show_region else [1.1, 1.2, 1.4, 1.0, 1.0, 1.0, 1.0, 0.8]
+    headers = ["Region", "Job Code", "Customer", "Job Name", "Mob Start", "Job Start", "Job End", "Demob End", "Manage"] if show_region else ["Job Code", "Customer", "Job Name", "Mob Start", "Job Start", "Job End", "Demob End", "Manage"]
+
+    hdr = st.columns(widths)
+    for c, h in zip(hdr, headers):
+        c.markdown(f"**{h}**")
+
+    region_codes = regions_df["region_code"].tolist()
+
+    for _, row in df.iterrows():
+        cols = st.columns(widths)
+        col_idx = 0
+        if show_region:
+            cols[col_idx].write(region_format(str(row["region_code"])))
+            col_idx += 1
+        cols[col_idx].write(str(row["job_code"])); col_idx += 1
+        cols[col_idx].write(str(row.get("customer", "") or "")); col_idx += 1
+        cols[col_idx].write(str(row["job_name"])); col_idx += 1
+        cols[col_idx].write(format_date_value(row["mob_start_date"])); col_idx += 1
+        cols[col_idx].write(format_date_value(row["job_start_date"])); col_idx += 1
+        cols[col_idx].write(format_date_value(row["job_end_date"])); col_idx += 1
+        cols[col_idx].write(format_date_value(row["demob_end_date"])); col_idx += 1
+
+        with cols[col_idx].popover("Edit/Delete", use_container_width=True):
+            region_idx = region_codes.index(row["region_code"])
+            edit_customer = st.text_input("Customer", value=str(row.get("customer", "") or ""), key=f"job_customer_{row['id']}")
+            edit_customer_color = st.color_picker("Customer Color", value=str(row.get("customer_color", "") or "#1f77b4"), key=f"job_customer_color_{row['id']}")
+            edit_region = st.selectbox("Region", region_codes, index=region_idx, format_func=region_format, disabled=region_disabled(active_region), key=f"job_region_{row['id']}")
+            edit_job_name = st.text_input("Job Name", value=str(row["job_name"]), key=f"job_name_{row['id']}")
+            edit_location = st.text_input("Location", value=str(row.get("location", "") or ""), key=f"job_loc_{row['id']}")
+            edit_start = st.date_input("Job Start Date", value=pd.to_datetime(row["job_start_date"]).date(), key=f"job_start_{row['id']}")
+            edit_duration = st.number_input("Job Duration (days)", min_value=1, value=int(row["job_duration_days"]), step=1, key=f"job_duration_{row['id']}")
+            edit_mob = st.number_input("Mobilization Days Before Job", min_value=0, value=int(row["mob_days_before_job"]), step=1, key=f"job_mob_{row['id']}")
+            edit_demob = st.number_input("Demobilization Days After Job", min_value=0, value=int(row["demob_days_after_job"]), step=1, key=f"job_demob_{row['id']}")
+            statuses = ["Planned", "Tentative", "Active", "Billing Pending", "Complete", "Cancelled"]
+            status_index = statuses.index(row["status"]) if row["status"] in statuses else 0
+            edit_status = st.selectbox("Status", statuses, index=status_index, key=f"job_status_{row['id']}")
+            edit_notes = st.text_area("Notes", value=str(row.get("notes", "") or ""), key=f"job_notes_{row['id']}")
+            a, b = st.columns(2)
+            if a.button("Save", key=f"save_job_{row['id']}"):
+                update_job(engine, int(row["id"]), {
+                    "job_name": edit_job_name,
+                    "region_code": active_region_value(active_region, edit_region),
+                    "customer": edit_customer,
+                    "customer_color": edit_customer_color,
+                    "location": edit_location,
+                    "job_start_date": edit_start,
+                    "job_duration_days": int(edit_duration),
+                    "mob_days_before_job": int(edit_mob),
+                    "demob_days_after_job": int(edit_demob),
+                    "status": edit_status,
+                    "notes": edit_notes,
+                })
+                st.rerun()
+            if b.button("Delete", key=f"delete_job_{row['id']}"):
+                delete_job(engine, int(row["id"]))
+                st.rerun()
+
+def render_requirements_manage_table(df: pd.DataFrame):
+    st.markdown("##### Manage Requirements")
+    if df.empty:
+        st.info("No requirements yet.")
+        return
+    hdr = st.columns([1.0, 1.3, 1.0, 0.8, 1.0, 0.9, 0.8])
+    for c, h in zip(hdr, ["Job Code", "Class", "Region", "Qty", "Assigned", "Status", "Manage"]):
+        c.markdown(f"**{h}**")
+    rc_df = resource_options_df()
+    for _, row in df.iterrows():
+        cols = st.columns([1.0, 1.3, 1.0, 0.8, 1.0, 0.9, 0.8])
+        cols[0].write(str(row["job_code"]))
+        cols[1].write(str(row["class_name"]))
+        cols[2].write(region_format(str(row["region_code"])))
+        cols[3].write(str(row["quantity_required"]))
+        cols[4].write(str(row["quantity_assigned"]))
+        cols[5].write(str(row["allocation_status"]))
+        rc_match = rc_df.loc[rc_df["class_name"] == row["class_name"]].iloc[0]
+        with cols[6].popover("Edit/Delete", use_container_width=True):
+            current_idx = rc_df["class_name"].tolist().index(row["class_name"])
+            edit_rc_display = st.selectbox("Resource Class", rc_df["display"].tolist(), index=current_idx, key=f"req_class_{row['id']}")
+            edit_rc = rc_df.loc[rc_df["display"] == edit_rc_display].iloc[0]
+            step = quantity_step(str(edit_rc["unit_type"]), str(edit_rc["category"]))
+            fmt = quantity_format(str(edit_rc["unit_type"]), str(edit_rc["category"]))
+            edit_qty = st.number_input("Quantity Required", min_value=0.0, value=float(row["quantity_required"]), step=step, format=fmt, key=f"req_qty_{row['id']}")
+            priorities = ["Low", "Normal", "High", "Critical"]
+            p_index = priorities.index(row["priority"]) if row["priority"] in priorities else 1
+            edit_priority = st.selectbox("Priority", priorities, index=p_index, key=f"req_priority_{row['id']}")
+            edit_before = st.number_input("Days Before Job Start", min_value=0, value=int(row["days_before_job_start"]), step=1, key=f"req_before_{row['id']}")
+            edit_after = st.number_input("Days After Job End", min_value=0, value=int(row["days_after_job_end"]), step=1, key=f"req_after_{row['id']}")
+            edit_notes = st.text_area("Notes", value=str(row.get("notes", "") or ""), key=f"req_notes_{row['id']}")
+            a, b = st.columns(2)
+            if a.button("Save", key=f"save_req_{row['id']}"):
+                update_requirement(engine, int(row["id"]), {
+                    "resource_class_id": int(edit_rc["id"]),
+                    "quantity_required": float(edit_qty),
+                    "days_before_job_start": int(edit_before),
+                    "days_after_job_end": int(edit_after),
+                    "priority": edit_priority,
+                    "notes": edit_notes,
+                })
+                st.rerun()
+            if b.button("Delete", key=f"delete_req_{row['id']}"):
+                delete_requirement(engine, int(row["id"]))
+                st.rerun()
+
+
+def render_pools_manage_table(df: pd.DataFrame, active_region: str):
+    st.markdown("##### Manage Pools")
+    if df.empty:
+        st.info("No pool rows yet.")
+        return
+    hdr = st.columns([1.0, 1.3, 0.8, 0.8, 0.8, 1.0, 0.8])
+    for c, h in zip(hdr, ["Region", "Class", "Pool Total", "Committed", "Available", "Status", "Manage"]):
+        c.markdown(f"**{h}**")
+    region_codes = regions_df["region_code"].tolist()
+    base_pool_df = get_pools_df(engine)
+    rc_df = resource_options_df()
+    for _, row in df.iterrows():
+        cols = st.columns([1.0, 1.3, 0.8, 0.8, 0.8, 1.0, 0.8])
+        cols[0].write(region_format(str(row["region_code"])))
+        cols[1].write(str(row["class_name"]))
+        cols[2].write(str(row["total_pool"]))
+        cols[3].write(str(row["committed_quantity"]))
+        cols[4].write(str(row["available_quantity"]))
+        cols[5].write(str(row["pool_status"]))
+        rc_match = rc_df.loc[rc_df["class_name"] == row["class_name"]].iloc[0]
+        step = quantity_step(str(rc_match["unit_type"]), str(rc_match["category"]))
+        fmt = quantity_format(str(rc_match["unit_type"]), str(rc_match["category"]))
+        with cols[6].popover("Edit/Delete", use_container_width=True):
+            region_idx = region_codes.index(row["region_code"])
+            edit_region = st.selectbox("Region", region_codes, index=region_idx, format_func=region_format, disabled=region_disabled(active_region), key=f"pool_region_{row['id']}")
+            edit_qty = st.number_input("Base Quantity", min_value=0.0, value=float(row["base_quantity"]), step=step, format=fmt, key=f"pool_qty_{row['id']}")
+            pool_row = base_pool_df.loc[base_pool_df["id"] == row["id"]].iloc[0]
+            edit_notes = st.text_input("Notes", value=str(pool_row.get("notes", "") or ""), key=f"pool_notes_{row['id']}")
+            a, b = st.columns(2)
+            if a.button("Save", key=f"save_pool_{row['id']}"):
+                upsert_pool(engine, active_region_value(active_region, edit_region), int(pool_row["resource_class_id"]), float(edit_qty), edit_notes)
+                st.rerun()
+            if b.button("Delete", key=f"delete_pool_{row['id']}"):
+                delete_pool(engine, int(row["id"]))
+                st.rerun()
+
+
+
+def format_compact_number(val):
+    try:
+        f = float(val)
+    except Exception:
+        return str(val)
+    if abs(f - round(f)) < 1e-9:
+        return str(int(round(f)))
+    s = f"{f:.3f}".rstrip("0").rstrip(".")
+    return "0" if s == "-0" else s
+
+
+def availability_font_color(val):
+    try:
+        f = float(val)
+    except Exception:
+        return "#1b4f9b"
+    return "#1f7a1f" if f >= 0 else "#b22222"
 
 
 def customer_base_color(customer: str) -> str:
@@ -76,7 +279,9 @@ def customer_base_color(customer: str) -> str:
 
 
 def shade_hex(hex_color: str, factor: float) -> str:
-    hex_color = hex_color.lstrip("#")
+    hex_color = str(hex_color or "").lstrip("#")
+    if len(hex_color) != 6:
+        hex_color = customer_base_color("fallback").lstrip("#")
     r = int(hex_color[0:2], 16) / 255.0
     g = int(hex_color[2:4], 16) / 255.0
     b = int(hex_color[4:6], 16) / 255.0
@@ -84,10 +289,15 @@ def shade_hex(hex_color: str, factor: float) -> str:
     l = max(0.28, min(0.78, l * factor))
     r2, g2, b2 = colorsys.hls_to_rgb(h, l, s)
     return f"#{int(r2*255):02x}{int(g2*255):02x}{int(b2*255):02x}"
+def week_start_label(ts: pd.Timestamp) -> str:
+    week_end = ts + pd.Timedelta(days=6)
+    if ts.month == week_end.month:
+        return f"{ts.strftime('%b')} {ts.day}-{week_end.day}"
+    return f"{ts.strftime('%b')} {ts.day}-{week_end.strftime('%b')} {week_end.day}"
 
 
-def build_integrated_planner_data(selected_class: str | None, start_date, num_weeks: int):
-    req = requirement_summary_df(engine)
+def build_planning_board_data(active_region: str, selected_class: str | None, start_date, num_weeks: int):
+    req = region_filter(requirement_summary_df(engine), active_region)
     if req.empty:
         return pd.DataFrame(), pd.DataFrame(), [], [], ""
 
@@ -99,12 +309,19 @@ def build_integrated_planner_data(selected_class: str | None, start_date, num_we
 
     req = req.loc[req["class_name"] == selected_class].copy()
 
-    jobs_lookup = get_jobs_df(engine)
+    jobs_lookup = region_filter(get_jobs_df(engine), active_region)
     if not jobs_lookup.empty and "customer" in jobs_lookup.columns:
-        req = req.merge(jobs_lookup[["job_code", "customer"]].drop_duplicates(), on="job_code", how="left")
+        merge_cols = ["job_code", "customer"]
+        if "customer_color" in jobs_lookup.columns:
+            merge_cols.append("customer_color")
+        req = req.merge(jobs_lookup[merge_cols].drop_duplicates(), on="job_code", how="left")
     else:
         req["customer"] = ""
+    if "customer_color" not in req.columns:
+        req["customer_color"] = ""
+
     req["customer"] = req["customer"].fillna("").replace("", "Unassigned")
+    req["customer_color"] = req["customer_color"].fillna("")
 
     start_ts = pd.to_datetime(start_date).normalize()
     week_starts = [start_ts + pd.Timedelta(days=7 * i) for i in range(num_weeks)]
@@ -119,9 +336,10 @@ def build_integrated_planner_data(selected_class: str | None, start_date, num_we
         rows.append(
             {
                 "customer": customer,
+                "customer_color": str(row.get("customer_color", "") or ""),
                 "job_code": row["job_code"],
                 "job_name": row["job_name"],
-                "label": f"{customer}, {row['job_name']}, {row['quantity_required']} {row['unit_type']}",
+                "label": f"{row['job_name']}, {format_compact_number(row['quantity_required'])} {row['unit_type']}",
                 "required_start": pd.to_datetime(row["required_start"]),
                 "required_end": pd.to_datetime(row["required_end"]),
                 "quantity_required": float(row["quantity_required"]),
@@ -132,29 +350,31 @@ def build_integrated_planner_data(selected_class: str | None, start_date, num_we
                 "customer_job_index": customer_job_index[customer],
             }
         )
-
     board_df = pd.DataFrame(rows)
 
     summary_rows = []
     for week_label, week_start, (wk_start, wk_end) in zip(week_labels, week_starts, week_ranges):
-        demand = fulfilled = shortfall = 0.0
+        need = in_region = shortfall = 0.0
+
         for _, row in req.iterrows():
             overlaps = pd.to_datetime(row["required_start"]) <= wk_end and pd.to_datetime(row["required_end"]) >= wk_start
             if overlaps:
-                demand += float(row["quantity_required"])
-                fulfilled += float(row["quantity_assigned"])
+                need += float(row["quantity_required"])
+                in_region += float(row["quantity_assigned"])
                 shortfall += float(row["quantity_shortfall"])
 
-        snap = pool_snapshot_df(engine, as_of_date=wk_start.date())
+        snap = region_filter(pool_snapshot_df(engine, as_of_date=wk_start.date()), active_region)
         availability = 0.0
+        total_pool = 0.0
         if not snap.empty:
             snap_match = snap.loc[snap["class_name"] == selected_class]
             if not snap_match.empty:
                 availability = float(snap_match["available_quantity"].iloc[0])
+                total_pool = float(snap_match["total_pool"].iloc[0])
 
         summary_rows.extend([
-            {"Metric": "Demand", "Week": week_label, "WeekStart": week_start, "Value": demand},
-            {"Metric": "Fulfillment", "Week": week_label, "WeekStart": week_start, "Value": fulfilled},
+            {"Metric": "Need", "Week": week_label, "WeekStart": week_start, "Value": need},
+            {"Metric": "In Region", "Week": week_label, "WeekStart": week_start, "Value": total_pool},
             {"Metric": "Availability", "Week": week_label, "WeekStart": week_start, "Value": availability},
             {"Metric": "Shortfall", "Week": week_label, "WeekStart": week_start, "Value": shortfall},
         ])
@@ -163,9 +383,9 @@ def build_integrated_planner_data(selected_class: str | None, start_date, num_we
     return board_df, summary_df, week_labels, week_starts, selected_class
 
 
-def render_integrated_planning_board():
+def render_planning_board(active_region: str):
     st.subheader("Planning Board")
-    req_all = requirement_summary_df(engine)
+    req_all = region_filter(requirement_summary_df(engine), active_region)
     if req_all.empty:
         st.info("No requirements yet.")
         return
@@ -178,7 +398,8 @@ def render_integrated_planning_board():
     board_start = c2.date_input("Board Start", value=date.today(), key="planning_start")
     num_weeks = c3.selectbox("Weeks", [8, 10, 12, 16], index=2, key="planning_weeks")
 
-    board_df, summary_df, week_labels, week_starts, selected_class = build_integrated_planner_data(
+    board_df, summary_df, week_labels, week_starts, selected_class = build_planning_board_data(
+        active_region=active_region,
         selected_class=selected_class,
         start_date=board_start,
         num_weeks=num_weeks,
@@ -188,7 +409,7 @@ def render_integrated_planning_board():
         st.info("No rows for that resource view.")
         return
 
-    summary_metrics = ["Demand", "Fulfillment", "Availability", "Shortfall"]
+    summary_metrics = ["Need", "In Region", "Availability", "Shortfall"]
     total_job_rows = len(board_df)
     total_rows = total_job_rows + 1 + len(summary_metrics)
 
@@ -196,25 +417,22 @@ def render_integrated_planning_board():
     x0 = pd.to_datetime(week_starts[0])
     x_end = pd.to_datetime(week_starts[-1]) + pd.Timedelta(days=7)
 
-    # Weekly vertical gridlines
     for ws in week_starts + [x_end]:
         fig.add_vline(x=ws, line_width=1, line_color="rgba(120,120,120,0.40)")
-
-    # Horizontal row gridlines
     for y in [i + 0.5 for i in range(total_rows + 1)]:
-        width = 2 if abs(y - (total_job_rows + 0.5)) < 1e-9 else 1
+        width = 2 if abs(y - (len(summary_metrics) + 0.5)) < 1e-9 else 1
         color = "rgba(90,90,90,0.55)" if width == 2 else "rgba(160,160,160,0.28)"
         fig.add_hline(y=y, line_width=width, line_color=color)
 
     row_positions = []
     row_labels = []
 
-    # Job bars
     for i, (_, row) in enumerate(board_df.iterrows()):
-        y = total_job_rows - i
+        y = total_rows - i
         row_positions.append(y)
         row_labels.append(str(row["customer"]))
-        base = customer_base_color(str(row["customer"]))
+
+        base = str(row.get("customer_color", "") or "") or customer_base_color(str(row["customer"]))
         factor = 0.86 + 0.12 * (int(row["customer_job_index"]) % 4)
         fill = shade_hex(base, factor)
 
@@ -231,7 +449,6 @@ def render_integrated_planning_board():
             fillcolor=fill,
             layer="below",
         )
-
         fig.add_annotation(
             x=start + (finish - start) / 2,
             y=y,
@@ -242,35 +459,38 @@ def render_integrated_planning_board():
             yanchor="middle",
         )
 
-    summary_y = {
-        "Demand": 4,
-        "Fulfillment": 3,
-        "Availability": 2,
-        "Shortfall": 1,
-    }
+    summary_y = {"Need": 4, "In Region": 3, "Availability": 2, "Shortfall": 1}
     for metric, y in summary_y.items():
         row_positions.append(y)
         row_labels.append(metric)
 
-    # Summary values inside same grid
     if not summary_df.empty:
         for _, rec in summary_df.iterrows():
             y = summary_y[rec["Metric"]]
             x = pd.to_datetime(rec["WeekStart"]) + pd.Timedelta(days=3.5)
             val = float(rec["Value"])
-            txt = f"{val:.3f}" if abs(val - round(val)) > 1e-9 else f"{int(round(val))}"
-            color = "#9b1c1c" if rec["Metric"] in ["Demand", "Shortfall"] else "#1b4f9b"
+            txt = format_compact_number(val)
+
+            if rec["Metric"] == "Availability":
+                color = availability_font_color(val)
+                font = dict(size=14, color=color, family="Arial Black")
+            elif rec["Metric"] in ["Need", "Shortfall"]:
+                color = "#9b1c1c"
+                font = dict(size=12, color=color)
+            else:
+                color = "#1b4f9b"
+                font = dict(size=12, color=color)
+
             fig.add_annotation(
                 x=x,
                 y=y,
                 text=txt,
                 showarrow=False,
-                font=dict(size=12, color=color),
+                font=font,
                 xanchor="center",
                 yanchor="middle",
             )
 
-    # Invisible trace to force axes
     fig.add_trace(go.Scatter(
         x=[x0, x_end],
         y=[0, total_rows + 1],
@@ -288,6 +508,7 @@ def render_integrated_planning_board():
         showgrid=False,
         range=[x0, x_end],
         tickfont=dict(size=11),
+        fixedrange=True,
     )
     fig.update_yaxes(
         tickmode="array",
@@ -297,6 +518,7 @@ def render_integrated_planning_board():
         showgrid=False,
         zeroline=False,
         tickfont=dict(size=12),
+        fixedrange=True,
     )
     fig.update_layout(
         height=max(520, 120 + total_rows * 50),
@@ -304,8 +526,37 @@ def render_integrated_planning_board():
         plot_bgcolor="white",
         paper_bgcolor="white",
     )
-    st.plotly_chart(fig, width="stretch")
+    st.plotly_chart(
+        fig,
+        width="stretch",
+        config={
+            "displayModeBar": True,
+            "displaylogo": False,
+            "modeBarButtons": [["toImage"]],
+            "toImageButtonOptions": {
+                "format": "png",
+                "filename": "planning_board",
+                "height": 1200,
+                "width": 2200,
+                "scale": 2,
+            },
+        },
+    )
 
+with st.sidebar:
+    st.header("Workspace")
+    region_options = ["Global"] + regions_df["region_code"].tolist()
+    ACTIVE_REGION = st.selectbox("Active Region", region_options, format_func=lambda x: "Global" if x == "Global" else region_format(x))
+    st.caption("Showing all regions" if ACTIVE_REGION == "Global" else region_format(ACTIVE_REGION))
+    if st.button("Rebalance All Allocations", type="primary"):
+        recalc_all_requirements(engine)
+        st.success("Rebalanced")
+        st.rerun()
+
+if "last_active_region" not in st.session_state:
+    st.session_state["last_active_region"] = ACTIVE_REGION
+if st.session_state["last_active_region"] != ACTIVE_REGION:
+    st.session_state["last_active_region"] = ACTIVE_REGION
 
 tab_jobs, tab_requirements, tab_pools, tab_allocations, tab_planning, tab_calendar, tab_gantt = st.tabs(
     ["Jobs", "Requirements", "Pools", "Allocations", "Planning Board", "Calendar", "Gantt"]
@@ -313,457 +564,350 @@ tab_jobs, tab_requirements, tab_pools, tab_allocations, tab_planning, tab_calend
 
 with tab_jobs:
     st.subheader("Create Job")
-    with st.form("create_job_form", clear_on_submit=True):
-        c1, c2, c3 = st.columns(3)
-        with c1:
-            job_name = st.text_input("Job Name")
-            region_code = st.selectbox(
-                "Region",
-                regions_df["region_code"].tolist(),
-                format_func=lambda x: f"{x} - {regions_df.loc[regions_df.region_code.eq(x), 'region_name'].iloc[0]}",
-            )
-            customer = st.text_input("Customer")
-        with c2:
-            location = st.text_input("Location")
-            job_start_date = st.date_input("Job Start Date", value=date.today())
-            st.caption(f"Selected: {job_start_date.strftime('%m/%d/%Y')}")
-            job_duration_days = st.number_input("Job Duration (days)", min_value=1, value=7)
-        with c3:
-            mob_days_before_job = st.number_input("Mobilization Days Before Job", min_value=0, value=3)
-            demob_days_after_job = st.number_input("Demobilization Days After Job", min_value=0, value=2)
-            status = st.selectbox("Status", ["Planned", "Tentative", "Active", "Complete", "Cancelled"])
-        notes = st.text_area("Notes")
-        dates_preview = calc_job_dates(
-            job_start_date,
-            int(job_duration_days),
-            int(mob_days_before_job),
-            int(demob_days_after_job),
-        )
-        st.info(
-            f"Job End: {format_date_value(dates_preview['job_end_date'])}  |  "
-            f"Mob Start: {format_date_value(dates_preview['mob_start_date'])}  |  "
-            f"Demob End: {format_date_value(dates_preview['demob_end_date'])}"
-        )
-        submitted = st.form_submit_button("Create Job")
-        if submitted and job_name:
-            try:
-                job_id = create_job(
-                    engine,
-                    {
-                        "job_name": job_name,
-                        "region_code": region_code,
-                        "customer": customer,
-                        "location": location,
-                        "job_start_date": job_start_date,
-                        "job_duration_days": int(job_duration_days),
-                        "mob_days_before_job": int(mob_days_before_job),
-                        "demob_days_after_job": int(demob_days_after_job),
-                        "status": status,
-                        "notes": notes,
-                    },
-                )
-                st.success(f"Created job #{job_id}.")
-                st.rerun()
-            except Exception as e:
-                st.error(f"Job creation failed: {e}")
 
-    st.subheader("Jobs")
-    jobs_df = get_jobs_df(engine)
-    if jobs_df.empty:
-        st.info("No jobs yet.")
-    else:
-        st.dataframe(
-            format_dates_for_display(
-                jobs_df[
-                    [
-                        "job_code",
-                        "job_name",
-                        "region_code",
-                        "customer",
-                        "location",
-                        "job_start_date",
-                        "job_end_date",
-                        "mob_start_date",
-                        "demob_end_date",
-                        "status",
-                    ]
-                ]
-            ),
-            use_container_width=True,
+    region_list = regions_df["region_code"].tolist()
+    default_region_index = region_default_index(region_list, ACTIVE_REGION)
+
+    if "create_job_reset_counter" not in st.session_state:
+        st.session_state["create_job_reset_counter"] = 0
+
+    reset_counter = st.session_state["create_job_reset_counter"]
+    region_key_suffix = f"{ACTIVE_REGION}_{reset_counter}"
+
+    default_region_value = ACTIVE_REGION if ACTIVE_REGION != "Global" else region_list[default_region_index]
+
+    c1, c2, c3 = st.columns(3)
+    with c1:
+        customer = st.text_input("Customer", key=f"create_job_customer_{region_key_suffix}")
+        customer_color = st.color_picker("Customer Color", value="#1f77b4", key=f"create_job_customer_color_{region_key_suffix}")
+        region_code = st.selectbox(
+            "Region",
+            region_list,
+            index=region_list.index(default_region_value) if default_region_value in region_list else default_region_index,
+            format_func=region_format,
+            disabled=region_disabled(ACTIVE_REGION),
+            key=f"create_job_region_{region_key_suffix}",
         )
+        location = st.text_input("Location", key=f"create_job_location_{region_key_suffix}")
+    with c2:
+        job_name = st.text_input("Job Name", key=f"create_job_name_{region_key_suffix}")
+        job_start_date = st.date_input("Job Start Date", value=date.today(), key=f"create_job_start_date_{region_key_suffix}")
+        st.caption(f"Selected: {job_start_date.strftime('%m/%d/%Y')}")
+        job_duration_days = st.number_input("Job Duration (days)", min_value=1, value=7, step=1, key=f"create_job_duration_{region_key_suffix}")
+    with c3:
+        mob_days_before_job = st.number_input("Mobilization Days Before Job", min_value=0, value=3, step=1, key=f"create_job_mob_{region_key_suffix}")
+        demob_days_after_job = st.number_input("Demobilization Days After Job", min_value=0, value=2, step=1, key=f"create_job_demob_{region_key_suffix}")
+        status = st.selectbox("Status", ["Planned", "Tentative", "Active", "Billing Pending", "Complete", "Cancelled"], key=f"create_job_status_{region_key_suffix}")
+    notes = st.text_area("Notes", key=f"create_job_notes_{region_key_suffix}")
+
+    dates_preview = calc_job_dates(
+        job_start_date,
+        int(job_duration_days),
+        int(mob_days_before_job),
+        int(demob_days_after_job),
+    )
+    st.info(
+        f"Job End: {format_date_value(dates_preview['job_end_date'])}  |  "
+        f"Mob Start: {format_date_value(dates_preview['mob_start_date'])}  |  "
+        f"Demob End: {format_date_value(dates_preview['demob_end_date'])}"
+    )
+
+    if st.button("Create Job", key=f"create_job_submit_{region_key_suffix}"):
+        if not job_name:
+            st.error("Job Name is required.")
+        else:
+            create_job(engine, {
+                "job_name": job_name,
+                "region_code": ACTIVE_REGION if ACTIVE_REGION != "Global" else region_code,
+                "customer": customer,
+                "customer_color": customer_color,
+                "location": location,
+                "job_start_date": job_start_date,
+                "job_duration_days": int(job_duration_days),
+                "mob_days_before_job": int(mob_days_before_job),
+                "demob_days_after_job": int(demob_days_after_job),
+                "status": status,
+                "notes": notes,
+            })
+            st.success("Created job.")
+            st.session_state["create_job_reset_counter"] += 1
+            st.rerun()
+
+    jobs_df = filter_active_jobs_for_management(region_filter(get_jobs_df(engine), ACTIVE_REGION))
+    render_jobs_manage_table(jobs_df, ACTIVE_REGION)
 
 with tab_requirements:
     st.subheader("Add Requirement")
-    jobs_df = get_jobs_df(engine)
+    jobs_df = region_filter(get_jobs_df(engine), ACTIVE_REGION)
     if jobs_df.empty:
         st.warning("Create a job first.")
     else:
         job_options = jobs_df.assign(display=jobs_df["job_code"] + " | " + jobs_df["job_name"])
-        with st.form("create_requirement_form", clear_on_submit=True):
-            c1, c2, c3 = st.columns(3)
-            selected_job_display = c1.selectbox("Job", job_options["display"].tolist())
-            selected_job = job_options.loc[job_options["display"] == selected_job_display].iloc[0]
+        rc_display = resource_options_df()
 
-            rc_display = resource_classes_df.assign(
-                display=resource_classes_df["category"] + " | " + resource_classes_df["class_name"]
-            )
-            selected_rc_display = c2.selectbox("Resource Class", rc_display["display"].tolist())
-            selected_rc = rc_display.loc[rc_display["display"] == selected_rc_display].iloc[0]
+        if "create_req_reset_counter" not in st.session_state:
+            st.session_state["create_req_reset_counter"] = 0
+        req_reset_counter = st.session_state["create_req_reset_counter"]
+        req_key_suffix = f"{ACTIVE_REGION}_{req_reset_counter}"
 
-            quantity_required = c3.number_input(
-                f"Quantity Required ({selected_rc['unit_type']})",
-                min_value=0.0,
-                value=1.0,
-                step=0.5,
-            )
-
-            c4, c5, c6 = st.columns(3)
-            days_before_job_start = c4.number_input("Days Before Job Start", min_value=0, value=0)
-            days_after_job_end = c5.number_input("Days After Job End", min_value=0, value=0)
-            priority = c6.selectbox("Priority", ["Low", "Normal", "High", "Critical"], index=1)
-
-            req_notes = st.text_area("Notes")
-
-            req_start = pd.to_datetime(selected_job["job_start_date"]).date() - pd.Timedelta(days=int(days_before_job_start))
-            req_end = pd.to_datetime(selected_job["job_end_date"]).date() + pd.Timedelta(days=int(days_after_job_end))
-            st.info(f"Requirement Window: {format_date_value(req_start)} to {format_date_value(req_end)}")
-
-            submitted = st.form_submit_button("Add Requirement")
-            if submitted:
-                try:
-                    create_requirement(
-                        engine,
-                        {
-                            "job_id": int(selected_job["id"]),
-                            "resource_class_id": int(selected_rc["id"]),
-                            "quantity_required": float(quantity_required),
-                            "days_before_job_start": int(days_before_job_start),
-                            "days_after_job_end": int(days_after_job_end),
-                            "priority": priority,
-                            "notes": req_notes,
-                        },
-                    )
-                    st.success("Requirement added and auto-allocation applied.")
-                    st.rerun()
-                except Exception as e:
-                    st.error(f"Requirement save failed: {e}")
-
-    st.subheader("Requirement Summary")
-    req_summary = requirement_summary_df(engine)
-    if req_summary.empty:
-        st.info("No requirements yet.")
-    else:
-        st.dataframe(
-            format_dates_for_display(
-                req_summary[
-                    [
-                        "job_code",
-                        "job_name",
-                        "region_code",
-                        "class_name",
-                        "quantity_required",
-                        "unit_type",
-                        "required_start",
-                        "required_end",
-                        "quantity_assigned",
-                        "quantity_shortfall",
-                        "allocation_status",
-                    ]
-                ]
-            ),
-            use_container_width=True,
-        )
-
-with tab_pools:
-    st.subheader("Resource Pools")
-    rc_display = resource_classes_df.assign(
-        display=resource_classes_df["category"] + " | " + resource_classes_df["class_name"]
-    )
-
-    with st.form("upsert_pool_form"):
         c1, c2, c3 = st.columns(3)
-        region_code = c1.selectbox(
-            "Region",
-            regions_df["region_code"].tolist(),
-            key="pool_region",
+
+        selected_job_display = c1.selectbox(
+            "Job",
+            job_options["display"].tolist(),
+            key=f"create_req_job_{req_key_suffix}",
         )
+        selected_job = job_options.loc[job_options["display"] == selected_job_display].iloc[0]
+
         selected_rc_display = c2.selectbox(
             "Resource Class",
             rc_display["display"].tolist(),
-            key="pool_rc",
+            key=f"create_req_rc_{req_key_suffix}",
         )
         selected_rc = rc_display.loc[rc_display["display"] == selected_rc_display].iloc[0]
 
-        base_quantity = c3.number_input(
-            f"Base Quantity ({selected_rc['unit_type']})",
+        step = quantity_step(str(selected_rc["unit_type"]), str(selected_rc["category"]))
+        fmt = quantity_format(str(selected_rc["unit_type"]), str(selected_rc["category"]))
+
+        quantity_required = c3.number_input(
+            f"Quantity Required ({selected_rc['unit_type']})",
             min_value=0.0,
-            value=0.0,
-            step=0.5,
-            format="%.2f",
-            key="pool_base_quantity",
+            value=step,
+            step=step,
+            format=fmt,
+            key=f"create_req_qty_{req_key_suffix}",
         )
 
-        notes = st.text_input("Notes", key="pool_notes")
-        submitted = st.form_submit_button("Save Pool Quantity")
+        c4, c5, c6 = st.columns(3)
+        days_before_job_start = c4.number_input(
+            "Days Before Job Start",
+            min_value=0,
+            value=0,
+            step=1,
+            key=f"create_req_before_{req_key_suffix}",
+        )
+        days_after_job_end = c5.number_input(
+            "Days After Job End",
+            min_value=0,
+            value=0,
+            step=1,
+            key=f"create_req_after_{req_key_suffix}",
+        )
+        priority = c6.selectbox(
+            "Priority",
+            ["Low", "Normal", "High", "Critical"],
+            index=1,
+            key=f"create_req_priority_{req_key_suffix}",
+        )
 
-        if submitted:
-            try:
-                submitted_qty = float(base_quantity)
+        req_notes = st.text_area("Notes", key=f"create_req_notes_{req_key_suffix}")
 
-                st.write("Submitted values:")
-                st.json(
-                    {
-                        "region_code": region_code,
-                        "resource_class_id": int(selected_rc["id"]),
-                        "class_name": str(selected_rc["class_name"]),
-                        "base_quantity": submitted_qty,
-                        "unit_type": str(selected_rc["unit_type"]),
-                        "notes": notes,
-                    }
-                )
+        req_start = pd.to_datetime(selected_job["job_start_date"]).date() - pd.Timedelta(days=int(days_before_job_start))
+        req_end = pd.to_datetime(selected_job["job_end_date"]).date() + pd.Timedelta(days=int(days_after_job_end))
+        st.info(f"Requirement Window: {format_date_value(req_start)} to {format_date_value(req_end)}")
 
-                upsert_pool(
-                    engine,
-                    region_code,
-                    int(selected_rc["id"]),
-                    submitted_qty,
-                    notes,
-                )
+        if st.button("Add Requirement", key=f"create_req_submit_{req_key_suffix}"):
+            create_requirement(
+                engine,
+                {
+                    "job_id": int(selected_job["id"]),
+                    "resource_class_id": int(selected_rc["id"]),
+                    "quantity_required": float(quantity_required),
+                    "days_before_job_start": int(days_before_job_start),
+                    "days_after_job_end": int(days_after_job_end),
+                    "priority": priority,
+                    "notes": req_notes,
+                },
+            )
+            st.success("Requirement added.")
+            st.session_state["create_req_reset_counter"] += 1
+            st.rerun()
 
-                st.success(
-                    f"Pool saved: {region_code} / {selected_rc['class_name']} / {submitted_qty} {selected_rc['unit_type']}"
-                )
+    st.subheader("Requirement Summary")
+    req_summary = region_filter(requirement_summary_df(engine), ACTIVE_REGION)
+    if req_summary.empty:
+        st.info("No requirements yet.")
+    else:
+        display_req = format_dates_for_display(req_summary[["job_code","job_name","region_code","class_name","quantity_required","unit_type","required_start","required_end","quantity_assigned","quantity_shortfall","allocation_status"]])
+        display_req["region_code"] = display_req["region_code"].map(lambda x: region_format(str(x)))
+        st.dataframe(display_req, width="stretch")
+        render_requirements_manage_table(req_summary)
 
-                verify_df = query_df(
-                    engine,
-                    """
-                    SELECT
-                        rp.id,
-                        rp.region_code,
-                        rc.class_name,
-                        rp.base_quantity,
-                        rp.notes
-                    FROM resource_pools rp
-                    JOIN resource_classes rc
-                      ON rp.resource_class_id = rc.id
-                    WHERE rp.region_code = :region_code
-                      AND rp.resource_class_id = :resource_class_id
-                    """,
-                    {
-                        "region_code": region_code,
-                        "resource_class_id": int(selected_rc["id"]),
-                    },
-                )
+with tab_pools:
+    st.subheader("Resource Pools")
+    rc_display = resource_options_df()
+    region_codes = regions_df["region_code"].tolist()
+    default_region_index = region_default_index(region_codes, ACTIVE_REGION)
 
-                st.write("Saved row check:")
-                st.dataframe(verify_df, use_container_width=True)
+    if "create_pool_reset_counter" not in st.session_state:
+        st.session_state["create_pool_reset_counter"] = 0
+    pool_reset_counter = st.session_state["create_pool_reset_counter"]
+    pool_key_suffix = f"{ACTIVE_REGION}_{pool_reset_counter}"
 
-            except Exception as e:
-                st.error(f"Pool save failed: {e}")
+    c1, c2, c3 = st.columns(3)
+    region_code = c1.selectbox(
+        "Region",
+        region_codes,
+        index=default_region_index,
+        format_func=region_format,
+        disabled=region_disabled(ACTIVE_REGION),
+        key=f"pool_region_{pool_key_suffix}",
+    )
+    selected_rc_display = c2.selectbox(
+        "Resource Class",
+        rc_display["display"].tolist(),
+        key=f"pool_rc_{pool_key_suffix}",
+    )
+    selected_rc = rc_display.loc[rc_display["display"] == selected_rc_display].iloc[0]
+
+    step = quantity_step(str(selected_rc["unit_type"]), str(selected_rc["category"]))
+    fmt = quantity_format(str(selected_rc["unit_type"]), str(selected_rc["category"]))
+
+    base_quantity = c3.number_input(
+        f"Base Quantity ({selected_rc['unit_type']})",
+        min_value=0.0,
+        value=0.0,
+        step=step,
+        format=fmt,
+        key=f"pool_base_quantity_{pool_key_suffix}",
+    )
+
+    notes = st.text_input("Notes", key=f"pool_notes_{pool_key_suffix}")
+
+    if st.button("Save Pool Quantity", key=f"pool_submit_{pool_key_suffix}"):
+        upsert_pool(
+            engine,
+            ACTIVE_REGION if ACTIVE_REGION != "Global" else region_code,
+            int(selected_rc["id"]),
+            float(base_quantity),
+            notes,
+        )
+        st.success("Pool saved.")
+        st.session_state["create_pool_reset_counter"] += 1
+        st.rerun()
 
     st.subheader("Pool Adjustment Log")
     with st.form("pool_adjustment_form", clear_on_submit=True):
         c1, c2, c3, c4 = st.columns(4)
-        adj_region = c1.selectbox("Region", regions_df["region_code"].tolist(), key="adj_region")
-        adj_rc_display = c2.selectbox("Resource Class", rc_display["display"].tolist(), key="adj_rc")
+        adj_region = c1.selectbox("Region", region_codes, index=default_region_index, format_func=region_format, disabled=region_disabled(ACTIVE_REGION), key=f"adj_region_{ACTIVE_REGION}")
+        adj_rc_display = c2.selectbox("Resource Class", rc_display["display"].tolist(), key=f"adj_rc_{ACTIVE_REGION}")
         adj_rc = rc_display.loc[rc_display["display"] == adj_rc_display].iloc[0]
-        qty_change = c3.number_input(f"Quantity Change ({adj_rc['unit_type']})", value=0.0, step=0.5)
+        step = quantity_step(str(adj_rc["unit_type"]), str(adj_rc["category"]))
+        fmt = quantity_format(str(adj_rc["unit_type"]), str(adj_rc["category"]))
+        qty_change = c3.number_input(f"Quantity Change ({adj_rc['unit_type']})", value=0.0, step=step, format=fmt)
         adjustment_date = c4.date_input("Adjustment Date", value=date.today())
         st.caption(f"Selected: {adjustment_date.strftime('%m/%d/%Y')}")
-
         c5, c6 = st.columns(2)
-        reason = c5.selectbox(
-            "Reason",
-            ["Purchase", "Transfer In", "Transfer Out", "Retirement", "Damage/Loss", "Correction"],
-        )
-        adj_notes = c6.text_input("Notes", key="adj_notes")
-        submitted = st.form_submit_button("Add Adjustment")
-
-        if submitted:
-            try:
-                add_pool_adjustment(
-                    engine,
-                    {
-                        "region_code": adj_region,
-                        "resource_class_id": int(adj_rc["id"]),
-                        "quantity_change": float(qty_change),
-                        "adjustment_date": adjustment_date,
-                        "reason": reason,
-                        "notes": adj_notes,
-                    },
-                )
-                st.success("Adjustment added.")
-                st.rerun()
-            except Exception as e:
-                st.error(f"Adjustment save failed: {e}")
+        reason = c5.selectbox("Reason", ["Purchase","Transfer In","Transfer Out","Retirement","Damage/Loss","Correction"])
+        adj_notes = c6.text_input("Notes", key=f"adj_notes_{ACTIVE_REGION}")
+        if st.form_submit_button("Add Adjustment"):
+            add_pool_adjustment(engine, {
+                "region_code": active_region_value(ACTIVE_REGION, adj_region),
+                "resource_class_id": int(adj_rc["id"]),
+                "quantity_change": float(qty_change),
+                "adjustment_date": adjustment_date,
+                "reason": reason,
+                "notes": adj_notes,
+            })
+            st.success("Adjustment added.")
+            st.rerun()
 
     as_of_date = st.date_input("Pool Snapshot As Of", value=date.today(), key="snapshot_date")
-    st.caption(f"Selected: {as_of_date.strftime('%m/%d/%Y')}")
-    snapshot = pool_snapshot_df(engine, as_of_date=as_of_date)
+    snapshot = region_filter(pool_snapshot_df(engine, as_of_date=as_of_date), ACTIVE_REGION)
     if snapshot.empty:
         st.info("No pools set up yet.")
     else:
-        st.dataframe(format_dates_for_display(snapshot), use_container_width=True)
+        display_snapshot = format_dates_for_display(snapshot.copy())
+        display_snapshot["region_code"] = display_snapshot["region_code"].map(lambda x: region_format(str(x)))
+        st.dataframe(display_snapshot, width="stretch")
         snapshot_display = format_dates_for_display(snapshot)
         csv_data = snapshot_display.to_csv(index=False).encode("utf-8")
         excel_data = export_excel({"Pool Snapshot": snapshot_display})
         c1, c2 = st.columns(2)
-        c1.download_button(
-            "Download Pool Snapshot CSV",
-            data=csv_data,
-            file_name=f"pool_snapshot_{as_of_date}.csv",
-            mime="text/csv",
-        )
-        c2.download_button(
-            "Download Pool Snapshot Excel",
-            data=excel_data,
-            file_name=f"pool_snapshot_{as_of_date}.xlsx",
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        )
+        c1.download_button("Download Pool Snapshot CSV", data=csv_data, file_name=f"pool_snapshot_{as_of_date}.csv", mime="text/csv")
+        c2.download_button("Download Pool Snapshot Excel", data=excel_data, file_name=f"pool_snapshot_{as_of_date}.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+        render_pools_manage_table(snapshot, ACTIVE_REGION)
 
 with tab_allocations:
     st.subheader("Allocations")
-    req_summary = requirement_summary_df(engine)
-    ful = get_fulfillment_df(engine)
-
+    req_summary = region_filter(requirement_summary_df(engine), ACTIVE_REGION)
+    ful = region_filter(get_fulfillment_df(engine), ACTIVE_REGION)
     if req_summary.empty:
         st.info("No requirements yet.")
     else:
-        st.dataframe(
-            format_dates_for_display(
-                req_summary[
-                    [
-                        "job_code",
-                        "job_name",
-                        "region_code",
-                        "class_name",
-                        "quantity_required",
-                        "quantity_assigned",
-                        "quantity_shortfall",
-                        "allocation_status",
-                    ]
-                ]
-            ),
-            use_container_width=True,
-        )
-
+        display_req = format_dates_for_display(req_summary[["job_code","job_name","region_code","class_name","quantity_required","quantity_assigned","quantity_shortfall","allocation_status"]])
+        display_req["region_code"] = display_req["region_code"].map(lambda x: region_format(str(x)))
+        st.dataframe(display_req, width="stretch")
     st.subheader("Fulfillment Rows")
     if ful.empty:
         st.info("No fulfillment rows yet.")
     else:
-        st.dataframe(
-            format_dates_for_display(
-                ful[
-                    [
-                        "job_code",
-                        "job_name",
-                        "region_code",
-                        "class_name",
-                        "fulfillment_type",
-                        "source_name",
-                        "specific_resource_name",
-                        "quantity_assigned",
-                        "required_start",
-                        "required_end",
-                    ]
-                ]
-            ),
-            use_container_width=True,
-        )
+        display_ful = format_dates_for_display(ful[["job_code","job_name","region_code","class_name","fulfillment_type","source_name","specific_resource_name","quantity_assigned","required_start","required_end"]])
+        display_ful["region_code"] = display_ful["region_code"].map(lambda x: region_format(str(x)))
+        st.dataframe(display_ful, width="stretch")
+    st.subheader("Allocation Debug")
+    dbg = region_filter(allocation_debug_df(engine), ACTIVE_REGION)
+    if dbg.empty:
+        st.info("No allocation debug data yet.")
+    else:
+        display_dbg = format_dates_for_display(dbg.copy())
+        display_dbg["region_code"] = display_dbg["region_code"].map(lambda x: region_format(str(x)))
+        st.dataframe(display_dbg, width="stretch")
 
 
 with tab_planning:
-    render_integrated_planning_board()
+    render_planning_board(ACTIVE_REGION)
 
 with tab_calendar:
     st.subheader("Calendar")
-    mode = st.radio("View Mode", ["Demand", "Fulfillment", "Availability"], horizontal=True)
+    mode = st.radio("View Mode", ["Demand","Fulfillment","Availability"], horizontal=True)
     as_of_date = st.date_input("Calendar As Of", value=date.today(), key="calendar_date")
     st.caption(f"Selected: {as_of_date.strftime('%m/%d/%Y')}")
-
     if mode == "Availability":
-        snapshot = pool_snapshot_df(engine, as_of_date=as_of_date)
+        snapshot = region_filter(pool_snapshot_df(engine, as_of_date=as_of_date), ACTIVE_REGION)
         if snapshot.empty:
             st.info("No pool data available.")
         else:
-            st.dataframe(
-                format_dates_for_display(
-                    snapshot[
-                        [
-                            "region_code",
-                            "class_name",
-                            "unit_type",
-                            "total_pool",
-                            "committed_quantity",
-                            "available_quantity",
-                            "pool_status",
-                        ]
-                    ]
-                ),
-                use_container_width=True,
-            )
-
+            display_snapshot = format_dates_for_display(snapshot.copy())
+            display_snapshot["region_code"] = display_snapshot["region_code"].map(lambda x: region_format(str(x)))
+            st.dataframe(display_snapshot[["region_code","class_name","unit_type","total_pool","committed_quantity","available_quantity","pool_status"]], width="stretch")
     elif mode == "Demand":
-        req_summary = requirement_summary_df(engine)
+        req_summary = region_filter(requirement_summary_df(engine), ACTIVE_REGION)
         if req_summary.empty:
             st.info("No requirement data.")
         else:
             req_summary = req_summary.copy()
             req_summary["start"] = pd.to_datetime(req_summary["required_start"])
             req_summary["finish"] = pd.to_datetime(req_summary["required_end"])
-            fig = px.timeline(
-                req_summary,
-                x_start="start",
-                x_end="finish",
-                y="job_code",
-                color="class_name",
-                hover_data=["job_name", "region_code", "quantity_required", "unit_type", "allocation_status"],
-            )
+            fig = px.timeline(req_summary, x_start="start", x_end="finish", y="job_code", color="class_name", hover_data=["job_name","region_code","quantity_required","unit_type","allocation_status"])
             fig.update_yaxes(autorange="reversed")
-            st.plotly_chart(fig, use_container_width=True)
-
+            st.plotly_chart(fig, width="stretch")
     else:
-        ful = get_fulfillment_df(engine)
+        ful = region_filter(get_fulfillment_df(engine), ACTIVE_REGION)
         if ful.empty:
             st.info("No fulfillment data.")
         else:
             ful = ful.copy()
             ful["start"] = pd.to_datetime(ful["required_start"])
             ful["finish"] = pd.to_datetime(ful["required_end"])
-            fig = px.timeline(
-                ful,
-                x_start="start",
-                x_end="finish",
-                y="job_code",
-                color="fulfillment_type",
-                hover_data=["job_name", "region_code", "class_name", "quantity_assigned", "unit_type", "source_name"],
-            )
+            fig = px.timeline(ful, x_start="start", x_end="finish", y="job_code", color="fulfillment_type", hover_data=["job_name","region_code","class_name","quantity_assigned","unit_type","source_name"])
             fig.update_yaxes(autorange="reversed")
-            st.plotly_chart(fig, use_container_width=True)
+            st.plotly_chart(fig, width="stretch")
 
 with tab_gantt:
     st.subheader("Job Gantt")
-    req_summary = requirement_summary_df(engine)
+    req_summary = region_filter(requirement_summary_df(engine), ACTIVE_REGION)
     if req_summary.empty:
         st.info("No requirements yet.")
     else:
-        job_choices = req_summary[["job_code", "job_name"]].drop_duplicates().sort_values(["job_code"])
+        job_choices = req_summary[["job_code","job_name"]].drop_duplicates().sort_values(["job_code"])
         job_display = job_choices["job_code"] + " | " + job_choices["job_name"]
         selected = st.selectbox("Select Job", job_display.tolist())
         selected_code = selected.split(" | ")[0]
-
         job_df = req_summary.loc[req_summary["job_code"] == selected_code].copy()
         job_df["start"] = pd.to_datetime(job_df["required_start"])
         job_df["finish"] = pd.to_datetime(job_df["required_end"])
         job_df["task"] = job_df["class_name"] + " (" + job_df["quantity_required"].astype(str) + " " + job_df["unit_type"] + ")"
-
-        fig = px.timeline(
-            job_df,
-            x_start="start",
-            x_end="finish",
-            y="task",
-            color="allocation_status",
-            hover_data=["quantity_required", "quantity_assigned", "quantity_shortfall", "priority"],
-        )
+        fig = px.timeline(job_df, x_start="start", x_end="finish", y="task", color="allocation_status", hover_data=["quantity_required","quantity_assigned","quantity_shortfall","priority"])
         fig.update_yaxes(autorange="reversed")
-        st.plotly_chart(fig, use_container_width=True)
+        st.plotly_chart(fig, width="stretch")
