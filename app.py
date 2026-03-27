@@ -100,65 +100,6 @@ def resource_options_df() -> pd.DataFrame:
     rc["display"] = rc["class_name"]
     return rc
 
-
-def _toggle_table_sort(table_key: str, sort_key: str):
-    state_key = f"{table_key}_sort_state"
-    current = st.session_state.get(state_key, {"column": None, "ascending": True})
-    if current.get("column") == sort_key:
-        current["ascending"] = not bool(current.get("ascending", True))
-    else:
-        current = {"column": sort_key, "ascending": True}
-    st.session_state[state_key] = current
-
-
-def _apply_table_sort(df: pd.DataFrame, table_key: str, sortable_columns: dict[str, str]) -> pd.DataFrame:
-    state = st.session_state.get(f"{table_key}_sort_state", {})
-    sort_key = state.get("column")
-    ascending = bool(state.get("ascending", True))
-    if df.empty or not sort_key or sort_key not in sortable_columns:
-        return df
-
-    col = sortable_columns[sort_key]
-    if col not in df.columns:
-        return df
-
-    working = df.copy()
-    series = working[col]
-
-    if any(token in col.lower() for token in ["date", "start", "end"]):
-        sort_values = pd.to_datetime(series, errors="coerce")
-    elif pd.api.types.is_numeric_dtype(series):
-        sort_values = pd.to_numeric(series, errors="coerce")
-    else:
-        sort_values = series.fillna("").astype(str).str.casefold()
-
-    working["__sort_value__"] = sort_values
-    working = working.sort_values("__sort_value__", ascending=ascending, kind="mergesort", na_position="last").drop(columns="__sort_value__")
-    return working
-
-
-def _render_table_headers(widths: list[float], labels: list[str], table_key: str, sortable_columns: dict[str, str]):
-    hdr = st.columns(widths)
-    state = st.session_state.get(f"{table_key}_sort_state", {})
-    current_col = state.get("column")
-    ascending = bool(state.get("ascending", True))
-
-    for c, label in zip(hdr, labels):
-        if label in sortable_columns:
-            arrow = ""
-            if current_col == label:
-                arrow = " ▲" if ascending else " ▼"
-            c.button(
-                f"{label}{arrow}",
-                key=f"{table_key}_sort_{label}",
-                use_container_width=True,
-                on_click=_toggle_table_sort,
-                args=(table_key, label),
-            )
-        else:
-            c.markdown(f"**{label}**")
-
-
 def render_jobs_manage_table(df: pd.DataFrame, active_region: str):
     st.markdown("##### Manage Jobs")
     if df.empty:
@@ -168,19 +109,10 @@ def render_jobs_manage_table(df: pd.DataFrame, active_region: str):
     show_region = active_region == "Global"
     widths = [1.0, 1.1, 1.2, 1.4, 1.0, 1.0, 1.0, 1.0, 0.8] if show_region else [1.1, 1.2, 1.4, 1.0, 1.0, 1.0, 1.0, 0.8]
     headers = ["Region", "Job Code", "Customer", "Job Name", "Mob Start", "Job Start", "Job End", "Demob End", "Manage"] if show_region else ["Job Code", "Customer", "Job Name", "Mob Start", "Job Start", "Job End", "Demob End", "Manage"]
-    sortable = {
-        "Region": "region_code",
-        "Job Code": "job_code",
-        "Customer": "customer",
-        "Job Name": "job_name",
-        "Mob Start": "mob_start_date",
-        "Job Start": "job_start_date",
-        "Job End": "job_end_date",
-        "Demob End": "demob_end_date",
-    }
 
-    df = _apply_table_sort(df, "jobs_manage", sortable)
-    _render_table_headers(widths, headers, "jobs_manage", sortable)
+    hdr = st.columns(widths)
+    for c, h in zip(hdr, headers):
+        c.markdown(f"**{h}**")
 
     region_codes = regions_df["region_code"].tolist()
 
@@ -233,36 +165,24 @@ def render_jobs_manage_table(df: pd.DataFrame, active_region: str):
                 delete_job(engine, int(row["id"]))
                 st.rerun()
 
-
 def render_requirements_manage_table(df: pd.DataFrame):
     st.markdown("##### Manage Requirements")
     if df.empty:
         st.info("No requirements yet.")
         return
-
-    widths = [1.0, 1.3, 1.0, 0.8, 1.0, 0.9, 0.8]
-    headers = ["Job Code", "Class", "Region", "Qty", "Assigned", "Status", "Manage"]
-    sortable = {
-        "Job Code": "job_code",
-        "Class": "class_name",
-        "Region": "region_code",
-        "Qty": "quantity_required",
-        "Assigned": "quantity_assigned",
-        "Status": "allocation_status",
-    }
-
-    df = _apply_table_sort(df, "requirements_manage", sortable)
-    _render_table_headers(widths, headers, "requirements_manage", sortable)
-
+    hdr = st.columns([1.0, 1.3, 1.0, 0.8, 1.0, 0.9, 0.8])
+    for c, h in zip(hdr, ["Job Code", "Class", "Region", "Qty", "Assigned", "Status", "Manage"]):
+        c.markdown(f"**{h}**")
     rc_df = resource_options_df()
     for _, row in df.iterrows():
-        cols = st.columns(widths)
+        cols = st.columns([1.0, 1.3, 1.0, 0.8, 1.0, 0.9, 0.8])
         cols[0].write(str(row["job_code"]))
         cols[1].write(str(row["class_name"]))
         cols[2].write(region_format(str(row["region_code"])))
-        cols[3].write(format_compact_number(row["quantity_required"]))
-        cols[4].write(format_compact_number(row["quantity_assigned"]))
+        cols[3].write(str(row["quantity_required"]))
+        cols[4].write(str(row["quantity_assigned"]))
         cols[5].write(str(row["allocation_status"]))
+        rc_match = rc_df.loc[rc_df["class_name"] == row["class_name"]].iloc[0]
         with cols[6].popover("Edit/Delete", use_container_width=True):
             current_idx = rc_df["class_name"].tolist().index(row["class_name"])
             edit_rc_display = st.selectbox("Resource Class", rc_df["display"].tolist(), index=current_idx, key=f"req_class_{row['id']}")
@@ -297,31 +217,19 @@ def render_pools_manage_table(df: pd.DataFrame, active_region: str):
     if df.empty:
         st.info("No pool rows yet.")
         return
-
-    widths = [1.0, 1.3, 0.8, 0.8, 0.8, 1.0, 0.8]
-    headers = ["Region", "Class", "Pool Total", "Committed", "Available", "Status", "Manage"]
-    sortable = {
-        "Region": "region_code",
-        "Class": "class_name",
-        "Pool Total": "total_pool",
-        "Committed": "committed_quantity",
-        "Available": "available_quantity",
-        "Status": "pool_status",
-    }
-
-    df = _apply_table_sort(df, "pools_manage", sortable)
-    _render_table_headers(widths, headers, "pools_manage", sortable)
-
+    hdr = st.columns([1.0, 1.3, 0.8, 0.8, 0.8, 1.0, 0.8])
+    for c, h in zip(hdr, ["Region", "Class", "Pool Total", "Committed", "Available", "Status", "Manage"]):
+        c.markdown(f"**{h}**")
     region_codes = regions_df["region_code"].tolist()
     base_pool_df = get_pools_df(engine)
     rc_df = resource_options_df()
     for _, row in df.iterrows():
-        cols = st.columns(widths)
+        cols = st.columns([1.0, 1.3, 0.8, 0.8, 0.8, 1.0, 0.8])
         cols[0].write(region_format(str(row["region_code"])))
         cols[1].write(str(row["class_name"]))
-        cols[2].write(format_compact_number(row["total_pool"]))
-        cols[3].write(format_compact_number(row["committed_quantity"]))
-        cols[4].write(format_compact_number(row["available_quantity"]))
+        cols[2].write(str(row["total_pool"]))
+        cols[3].write(str(row["committed_quantity"]))
+        cols[4].write(str(row["available_quantity"]))
         cols[5].write(str(row["pool_status"]))
         rc_match = rc_df.loc[rc_df["class_name"] == row["class_name"]].iloc[0]
         step = quantity_step(str(rc_match["unit_type"]), str(rc_match["category"]))
@@ -339,6 +247,8 @@ def render_pools_manage_table(df: pd.DataFrame, active_region: str):
             if b.button("Delete", key=f"delete_pool_{row['id']}"):
                 delete_pool(engine, int(row["id"]))
                 st.rerun()
+
+
 
 def format_compact_number(val):
     try:
@@ -407,11 +317,15 @@ def build_planning_board_data(active_region: str, selected_class: str | None, st
         req = req.merge(jobs_lookup[merge_cols].drop_duplicates(), on="job_code", how="left")
     else:
         req["customer"] = ""
+    if "customer" not in req.columns:
+        req["customer"] = "Unassigned"
+    else:
+        req["customer"] = req["customer"].fillna("").replace("", "Unassigned")
+
     if "customer_color" not in req.columns:
         req["customer_color"] = ""
-
-    req["customer"] = req["customer"].fillna("").replace("", "Unassigned")
-    req["customer_color"] = req["customer_color"].fillna("")
+    else:
+        req["customer_color"] = req["customer_color"].fillna("")
 
     start_ts = pd.to_datetime(start_date).normalize()
     week_starts = [start_ts + pd.Timedelta(days=7 * i) for i in range(num_weeks)]
@@ -480,7 +394,8 @@ def render_planning_board(active_region: str):
         st.info("No requirements yet.")
         return
 
-    class_options = [name for name in resource_classes_df["class_name"].astype(str).tolist() if name in set(req_all["class_name"].dropna().astype(str).tolist())]
+    class_options = req_all["class_name"].dropna().astype(str).unique().tolist()
+    class_options.sort()
 
     c1, c2, c3 = st.columns([1.6, 1, 1])
     selected_class = c1.selectbox("Resource View", class_options, key="planning_class")
