@@ -106,9 +106,8 @@ def render_jobs_manage_table(df: pd.DataFrame, active_region: str):
         st.info("No jobs yet.")
         return
 
-    show_region = active_region == "Global"
-    widths = [1.0, 1.1, 1.2, 1.4, 1.0, 1.0, 1.0, 1.0, 0.8] if show_region else [1.1, 1.2, 1.4, 1.0, 1.0, 1.0, 1.0, 0.8]
-    headers = ["Region", "Job Code", "Customer", "Job Name", "Mob Start", "Job Start", "Job End", "Demob End", "Manage"] if show_region else ["Job Code", "Customer", "Job Name", "Mob Start", "Job Start", "Job End", "Demob End", "Manage"]
+    widths = [1.3, 1.5, 1.0, 1.0, 1.0, 1.0, 1.0, 0.8]
+    headers = ["Customer", "Job Name", "Job Code", "Mob Start", "Job Start", "Job End", "Demob End", "Manage"]
 
     hdr = st.columns(widths)
     for c, h in zip(hdr, headers):
@@ -118,22 +117,18 @@ def render_jobs_manage_table(df: pd.DataFrame, active_region: str):
 
     for _, row in df.iterrows():
         cols = st.columns(widths)
-        col_idx = 0
-        if show_region:
-            cols[col_idx].write(region_format(str(row["region_code"])))
-            col_idx += 1
-        cols[col_idx].write(str(row["job_code"])); col_idx += 1
-        cols[col_idx].write(str(row.get("customer", "") or "")); col_idx += 1
-        cols[col_idx].write(str(row["job_name"])); col_idx += 1
-        cols[col_idx].write(format_date_value(row["mob_start_date"])); col_idx += 1
-        cols[col_idx].write(format_date_value(row["job_start_date"])); col_idx += 1
-        cols[col_idx].write(format_date_value(row["job_end_date"])); col_idx += 1
-        cols[col_idx].write(format_date_value(row["demob_end_date"])); col_idx += 1
+        cols[0].write(str(row.get("customer", "") or ""))
+        cols[1].write(str(row["job_name"]))
+        cols[2].write(str(row["job_code"]))
+        cols[3].write(format_date_value(row["mob_start_date"]))
+        cols[4].write(format_date_value(row["job_start_date"]))
+        cols[5].write(format_date_value(row["job_end_date"]))
+        cols[6].write(format_date_value(row["demob_end_date"]))
 
-        with cols[col_idx].popover("Edit/Delete", use_container_width=True):
+        with cols[7].popover("Edit/Delete", use_container_width=True):
             region_idx = region_codes.index(row["region_code"])
             edit_customer = st.text_input("Customer", value=str(row.get("customer", "") or ""), key=f"job_customer_{row['id']}")
-            edit_customer_color = st.color_picker("Customer Color", value=str(row.get("customer_color", "") or "#1f77b4"), key=f"job_customer_color_{row['id']}")
+            edit_customer_color = st.color_picker("Job Color", value=str(row.get("customer_color", "") or "#1f77b4"), key=f"job_customer_color_{row['id']}")
             edit_region = st.selectbox("Region", region_codes, index=region_idx, format_func=region_format, disabled=region_disabled(active_region), key=f"job_region_{row['id']}")
             edit_job_name = st.text_input("Job Name", value=str(row["job_name"]), key=f"job_name_{row['id']}")
             edit_location = st.text_input("Location", value=str(row.get("location", "") or ""), key=f"job_loc_{row['id']}")
@@ -164,6 +159,7 @@ def render_jobs_manage_table(df: pd.DataFrame, active_region: str):
             if b.button("Delete", key=f"delete_job_{row['id']}"):
                 delete_job(engine, int(row["id"]))
                 st.rerun()
+
 
 def render_requirements_manage_table(df: pd.DataFrame, key_prefix: str = 'req'):
     st.markdown("##### Manage Requirements")
@@ -651,7 +647,7 @@ with tab_jobs:
     c1, c2, c3 = st.columns(3)
     with c1:
         customer = st.text_input("Customer", key=f"create_job_customer_{region_key_suffix}")
-        customer_color = st.color_picker("Customer Color", value="#1f77b4", key=f"create_job_customer_color_{region_key_suffix}")
+        customer_color = st.color_picker("Job Color", value="#1f77b4", key=f"create_job_customer_color_{region_key_suffix}")
         region_code = st.selectbox(
             "Region",
             region_list,
