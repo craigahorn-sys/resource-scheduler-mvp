@@ -397,8 +397,9 @@ def build_planning_board_data(active_region: str, selected_class: str | None, st
         if not snap.empty:
             snap_match = snap.loc[snap["class_name"] == selected_class]
             if not snap_match.empty:
-                availability = float(snap_match["available_quantity"].iloc[0])
                 total_pool = float(snap_match["total_pool"].iloc[0])
+
+        availability = total_pool - need
 
         summary_rows.extend([
             {"Metric": "Need", "Week": week_label, "WeekStart": week_start, "Value": need},
