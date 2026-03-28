@@ -324,9 +324,23 @@ def build_planning_board_data(active_region: str, selected_class: str | None, st
         merge_cols = ["job_code", "customer"]
         if "customer_color" in jobs_lookup.columns:
             merge_cols.append("customer_color")
-        req = req.merge(jobs_lookup[merge_cols].drop_duplicates(), on="job_code", how="left")
-    else:
-        req["customer"] = ""
+        jobs_lookup_small = jobs_lookup[merge_cols].drop_duplicates()
+        req = req.merge(jobs_lookup_small, on="job_code", how="left", suffixes=("", "_job"))
+
+        if "customer_job" in req.columns:
+            if "customer" not in req.columns:
+                req["customer"] = req["customer_job"]
+            else:
+                req["customer"] = req["customer"].where(req["customer"].fillna("").astype(str).str.strip() != "", req["customer_job"])
+            req = req.drop(columns=["customer_job"])
+
+        if "customer_color_job" in req.columns:
+            if "customer_color" not in req.columns:
+                req["customer_color"] = req["customer_color_job"]
+            else:
+                req["customer_color"] = req["customer_color"].where(req["customer_color"].fillna("").astype(str).str.strip() != "", req["customer_color_job"])
+            req = req.drop(columns=["customer_color_job"])
+
     if "customer" not in req.columns:
         req["customer"] = "Unassigned"
     else:
@@ -571,8 +585,8 @@ if "last_active_region" not in st.session_state:
 if st.session_state["last_active_region"] != ACTIVE_REGION:
     st.session_state["last_active_region"] = ACTIVE_REGION
 
-tab_jobs, tab_job_requirements, tab_requirements, tab_pools, tab_allocations, tab_planning, tab_calendar, tab_gantt = st.tabs(
-    ["Jobs", "Job Requirements", "Requirements", "Pools", "Allocations", "Planning Board", "Calendar", "Gantt"]
+tab_jobs, tab_job_requirements, tab_requirements, tab_pools, tab_allocations, tab_planning = st.tabs(
+    ["Jobs", "Job Requirements", "Requirements", "Pools", "Allocations", "Planning Board"]
 )
 
 with tab_jobs:
@@ -984,56 +998,4 @@ with tab_allocations:
 with tab_planning:
     render_planning_board(ACTIVE_REGION)
 
-with tab_calendar:
-    st.subheader("Calendar")
-    mode = st.radio("View Mode", ["Demand","Fulfillment","Availability"], horizontal=True)
-    as_of_date = st.date_input("Calendar As Of", value=date.today(), key="calendar_date")
-    st.caption(f"Selected: {as_of_date.strftime('%m/%d/%Y')}")
-    if mode == "Availability":
-        snapshot = region_filter(pool_snapshot_df(engine, as_of_date=as_of_date), ACTIVE_REGION)
-        if snapshot.empty:
-            st.info("No pool data available.")
-        else:
-            display_snapshot = format_dates_for_display(snapshot.copy())
-            display_snapshot["region_code"] = display_snapshot["region_code"].map(lambda x: region_format(str(x)))
-            st.dataframe(display_snapshot[["region_code","class_name","unit_type","total_pool","committed_quantity","available_quantity","pool_status"]], width="stretch")
-    elif mode == "Demand":
-        req_summary = region_filter(requirement_summary_df(engine), ACTIVE_REGION)
-        if req_summary.empty:
-            st.info("No requirement data.")
-        else:
-            req_summary = req_summary.copy()
-            req_summary["start"] = pd.to_datetime(req_summary["required_start"])
-            req_summary["finish"] = pd.to_datetime(req_summary["required_end"])
-            fig = px.timeline(req_summary, x_start="start", x_end="finish", y="job_code", color="class_name", hover_data=["job_name","region_code","quantity_required","unit_type","allocation_status"])
-            fig.update_yaxes(autorange="reversed")
-            st.plotly_chart(fig, width="stretch")
-    else:
-        ful = region_filter(get_fulfillment_df(engine), ACTIVE_REGION)
-        if ful.empty:
-            st.info("No fulfillment data.")
-        else:
-            ful = ful.copy()
-            ful["start"] = pd.to_datetime(ful["required_start"])
-            ful["finish"] = pd.to_datetime(ful["required_end"])
-            fig = px.timeline(ful, x_start="start", x_end="finish", y="job_code", color="fulfillment_type", hover_data=["job_name","region_code","class_name","quantity_assigned","unit_type","source_name"])
-            fig.update_yaxes(autorange="reversed")
-            st.plotly_chart(fig, width="stretch")
 
-with tab_gantt:
-    st.subheader("Job Gantt")
-    req_summary = region_filter(requirement_summary_df(engine), ACTIVE_REGION)
-    if req_summary.empty:
-        st.info("No requirements yet.")
-    else:
-        job_choices = req_summary[["job_code","job_name"]].drop_duplicates().sort_values(["job_code"])
-        job_display = job_choices["job_code"] + " | " + job_choices["job_name"]
-        selected = st.selectbox("Select Job", job_display.tolist())
-        selected_code = selected.split(" | ")[0]
-        job_df = req_summary.loc[req_summary["job_code"] == selected_code].copy()
-        job_df["start"] = pd.to_datetime(job_df["required_start"])
-        job_df["finish"] = pd.to_datetime(job_df["required_end"])
-        job_df["task"] = job_df["class_name"] + " (" + job_df["quantity_required"].astype(str) + " " + job_df["unit_type"] + ")"
-        fig = px.timeline(job_df, x_start="start", x_end="finish", y="task", color="allocation_status", hover_data=["quantity_required","quantity_assigned","quantity_shortfall","priority"])
-        fig.update_yaxes(autorange="reversed")
-        st.plotly_chart(fig, width="stretch")
