@@ -289,6 +289,17 @@ def shade_hex(hex_color: str, factor: float) -> str:
     l = max(0.28, min(0.78, l * factor))
     r2, g2, b2 = colorsys.hls_to_rgb(h, l, s)
     return f"#{int(r2*255):02x}{int(g2*255):02x}{int(b2*255):02x}"
+
+
+def hex_to_rgba(hex_color: str, alpha: float) -> str:
+    hex_color = str(hex_color or "").lstrip("#")
+    if len(hex_color) != 6:
+        hex_color = customer_base_color("fallback").lstrip("#")
+    r = int(hex_color[0:2], 16)
+    g = int(hex_color[2:4], 16)
+    b = int(hex_color[4:6], 16)
+    a = max(0.0, min(1.0, float(alpha)))
+    return f"rgba({r}, {g}, {b}, {a})"
 def week_start_label(ts: pd.Timestamp) -> str:
     week_end = ts + pd.Timedelta(days=6)
     if ts.month == week_end.month:
@@ -448,8 +459,8 @@ def render_planning_board(active_region: str):
             x1=finish,
             y0=y - 0.34,
             y1=y + 0.34,
-            line=dict(color=fill, width=1),
-            fillcolor=fill,
+            line=dict(color=hex_to_rgba(fill, 0.72), width=1),
+            fillcolor=hex_to_rgba(fill, 0.32),
             layer="below",
         )
         fig.add_annotation(
@@ -561,8 +572,8 @@ if "last_active_region" not in st.session_state:
 if st.session_state["last_active_region"] != ACTIVE_REGION:
     st.session_state["last_active_region"] = ACTIVE_REGION
 
-tab_jobs, tab_requirements, tab_pools, tab_allocations, tab_planning, tab_calendar, tab_gantt = st.tabs(
-    ["Jobs", "Requirements", "Pools", "Allocations", "Planning Board", "Calendar", "Gantt"]
+tab_jobs, tab_requirements, tab_job_requirements, tab_pools, tab_allocations, tab_planning, tab_calendar, tab_gantt = st.tabs(
+    ["Jobs", "Requirements", "Job Requirements", "Pools", "Allocations", "Planning Board", "Calendar", "Gantt"]
 )
 
 with tab_jobs:
@@ -735,6 +746,125 @@ with tab_requirements:
         display_req["region_code"] = display_req["region_code"].map(lambda x: region_format(str(x)))
         st.dataframe(display_req, width="stretch")
         render_requirements_manage_table(req_summary)
+
+
+with tab_job_requirements:
+    st.subheader("Job Requirements")
+    jobs_df = region_filter(get_jobs_df(engine), ACTIVE_REGION)
+    if jobs_df.empty:
+        st.warning("Create a job first.")
+    else:
+        job_options = jobs_df.assign(display=jobs_df["job_code"] + " | " + jobs_df["job_name"]).sort_values(["job_code", "job_name"])
+        selected_job_display = st.selectbox(
+            "Select Job",
+            job_options["display"].tolist(),
+            key=f"job_req_selected_job_{ACTIVE_REGION}",
+        )
+        selected_job = job_options.loc[job_options["display"] == selected_job_display].iloc[0]
+
+        st.caption(
+            f"Selected job: {selected_job['job_code']} | {selected_job['job_name']}  •  "
+            f"Region: {region_format(str(selected_job['region_code']))}"
+        )
+
+        rc_display = resource_options_df()
+
+        if "job_req_reset_counter" not in st.session_state:
+            st.session_state["job_req_reset_counter"] = 0
+        job_req_reset_counter = st.session_state["job_req_reset_counter"]
+        job_req_key_suffix = f"{ACTIVE_REGION}_{int(selected_job['id'])}_{job_req_reset_counter}"
+
+        c1, c2, c3 = st.columns(3)
+        selected_rc_display = c1.selectbox(
+            "Resource Class",
+            rc_display["display"].tolist(),
+            key=f"job_req_rc_{job_req_key_suffix}",
+        )
+        selected_rc = rc_display.loc[rc_display["display"] == selected_rc_display].iloc[0]
+
+        step = quantity_step(str(selected_rc["unit_type"]), str(selected_rc["category"]))
+        fmt = quantity_format(str(selected_rc["unit_type"]), str(selected_rc["category"]))
+
+        quantity_required = c2.number_input(
+            f"Quantity Required ({selected_rc['unit_type']})",
+            min_value=0.0,
+            value=step,
+            step=step,
+            format=fmt,
+            key=f"job_req_qty_{job_req_key_suffix}",
+        )
+        priority = c3.selectbox(
+            "Priority",
+            ["Low", "Normal", "High", "Critical"],
+            index=1,
+            key=f"job_req_priority_{job_req_key_suffix}",
+        )
+
+        c4, c5 = st.columns(2)
+        days_before_job_start = c4.number_input(
+            "Days Before Job Start",
+            min_value=0,
+            value=0,
+            step=1,
+            key=f"job_req_before_{job_req_key_suffix}",
+        )
+        days_after_job_end = c5.number_input(
+            "Days After Job End",
+            min_value=0,
+            value=0,
+            step=1,
+            key=f"job_req_after_{job_req_key_suffix}",
+        )
+
+        req_notes = st.text_area("Notes", key=f"job_req_notes_{job_req_key_suffix}")
+
+        req_start = pd.to_datetime(selected_job["job_start_date"]).date() - pd.Timedelta(days=int(days_before_job_start))
+        req_end = pd.to_datetime(selected_job["job_end_date"]).date() + pd.Timedelta(days=int(days_after_job_end))
+        st.info(f"Requirement Window: {format_date_value(req_start)} to {format_date_value(req_end)}")
+
+        if st.button("Add Requirement to Selected Job", key=f"job_req_submit_{job_req_key_suffix}"):
+            create_requirement(
+                engine,
+                {
+                    "job_id": int(selected_job["id"]),
+                    "resource_class_id": int(selected_rc["id"]),
+                    "quantity_required": float(quantity_required),
+                    "days_before_job_start": int(days_before_job_start),
+                    "days_after_job_end": int(days_after_job_end),
+                    "priority": priority,
+                    "notes": req_notes,
+                },
+            )
+            st.success("Requirement added.")
+            st.session_state["job_req_reset_counter"] += 1
+            st.rerun()
+
+        st.subheader("Selected Job Requirement Summary")
+        req_summary = region_filter(requirement_summary_df(engine), ACTIVE_REGION)
+        selected_job_reqs = req_summary.loc[req_summary["job_code"] == selected_job["job_code"]].copy() if not req_summary.empty else pd.DataFrame()
+        if selected_job_reqs.empty:
+            st.info("No requirements yet for this job.")
+        else:
+            display_req = format_dates_for_display(
+                selected_job_reqs[
+                    [
+                        "job_code",
+                        "job_name",
+                        "region_code",
+                        "class_name",
+                        "quantity_required",
+                        "unit_type",
+                        "required_start",
+                        "required_end",
+                        "quantity_assigned",
+                        "quantity_shortfall",
+                        "allocation_status",
+                    ]
+                ]
+            )
+            display_req["region_code"] = display_req["region_code"].map(lambda x: region_format(str(x)))
+            st.dataframe(display_req, width="stretch")
+            render_requirements_manage_table(selected_job_reqs)
 
 with tab_pools:
     st.subheader("Resource Pools")
