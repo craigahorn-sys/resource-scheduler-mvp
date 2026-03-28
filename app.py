@@ -185,17 +185,17 @@ def render_requirements_manage_table(df: pd.DataFrame):
         rc_match = rc_df.loc[rc_df["class_name"] == row["class_name"]].iloc[0]
         with cols[6].popover("Edit/Delete", use_container_width=True):
             current_idx = rc_df["class_name"].tolist().index(row["class_name"])
-            edit_rc_display = st.selectbox("Resource Class", rc_df["display"].tolist(), index=current_idx, key=f"req_class_{row['id']}")
+            edit_rc_display = st.selectbox("Resource Class", rc_df["display"].tolist(), index=current_idx, key=f"{key_prefix}_class_{row['id']}")
             edit_rc = rc_df.loc[rc_df["display"] == edit_rc_display].iloc[0]
             step = quantity_step(str(edit_rc["unit_type"]), str(edit_rc["category"]))
             fmt = quantity_format(str(edit_rc["unit_type"]), str(edit_rc["category"]))
-            edit_qty = st.number_input("Quantity Required", min_value=0.0, value=float(row["quantity_required"]), step=step, format=fmt, key=f"req_qty_{row['id']}")
+            edit_qty = st.number_input("Quantity Required", min_value=0.0, value=float(row["quantity_required"]), step=step, format=fmt, key=f"{key_prefix}_qty_{row['id']}")
             priorities = ["Low", "Normal", "High", "Critical"]
             p_index = priorities.index(row["priority"]) if row["priority"] in priorities else 1
-            edit_priority = st.selectbox("Priority", priorities, index=p_index, key=f"req_priority_{row['id']}")
-            edit_before = st.number_input("Days Before Job Start", min_value=0, value=int(row["days_before_job_start"]), step=1, key=f"req_before_{row['id']}")
-            edit_after = st.number_input("Days After Job End", min_value=0, value=int(row["days_after_job_end"]), step=1, key=f"req_after_{row['id']}")
-            edit_notes = st.text_area("Notes", value=str(row.get("notes", "") or ""), key=f"req_notes_{row['id']}")
+            edit_priority = st.selectbox("Priority", priorities, index=p_index, key=f"{key_prefix}_priority_{row['id']}")
+            edit_before = st.number_input("Days Before Job Start", min_value=0, value=int(row["days_before_job_start"]), step=1, key=f"{key_prefix}_before_{row['id']}")
+            edit_after = st.number_input("Days After Job End", min_value=0, value=int(row["days_after_job_end"]), step=1, key=f"{key_prefix}_after_{row['id']}")
+            edit_notes = st.text_area("Notes", value=str(row.get("notes", "") or ""), key=f"{key_prefix}_notes_{row['id']}")
             a, b = st.columns(2)
             if a.button("Save", key=f"save_req_{row['id']}"):
                 update_requirement(engine, int(row["id"]), {
@@ -572,8 +572,8 @@ if "last_active_region" not in st.session_state:
 if st.session_state["last_active_region"] != ACTIVE_REGION:
     st.session_state["last_active_region"] = ACTIVE_REGION
 
-tab_jobs, tab_requirements, tab_job_requirements, tab_pools, tab_allocations, tab_planning, tab_calendar, tab_gantt = st.tabs(
-    ["Jobs", "Requirements", "Job Requirements", "Pools", "Allocations", "Planning Board", "Calendar", "Gantt"]
+tab_jobs, tab_job_requirements, tab_requirements, tab_pools, tab_allocations, tab_planning, tab_calendar, tab_gantt = st.tabs(
+    ["Jobs", "Job Requirements", "Requirements", "Pools", "Allocations", "Planning Board", "Calendar", "Gantt"]
 )
 
 with tab_jobs:
@@ -848,23 +848,21 @@ with tab_job_requirements:
             display_req = format_dates_for_display(
                 selected_job_reqs[
                     [
-                        "job_code",
-                        "job_name",
-                        "region_code",
                         "class_name",
                         "quantity_required",
-                        "unit_type",
                         "required_start",
                         "required_end",
-                        "quantity_assigned",
-                        "quantity_shortfall",
-                        "allocation_status",
                     ]
                 ]
             )
-            display_req["region_code"] = display_req["region_code"].map(lambda x: region_format(str(x)))
+            display_req.columns = [
+                "Class Name",
+                "Quantity Required",
+                "Required Start",
+                "Required End",
+            ]
             st.dataframe(display_req, width="stretch")
-            render_requirements_manage_table(selected_job_reqs)
+            render_requirements_manage_table(selected_job_reqs, key_prefix="jobreq")
 
 with tab_pools:
     st.subheader("Resource Pools")
