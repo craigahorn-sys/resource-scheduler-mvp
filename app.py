@@ -671,7 +671,7 @@ with tab_job_requirements:
     if jobs_df.empty:
         st.warning("Create a job first.")
     else:
-        job_options = jobs_df.assign(display=jobs_df["job_code"] + " | " + jobs_df["job_name"]).sort_values(["job_code", "job_name"])
+        job_options = jobs_df.assign(display=jobs_df["customer"].fillna("Unassigned") + " | " + jobs_df["job_name"] + " | " + jobs_df["job_code"]).sort_values(["job_code", "job_name"])
         selected_job_display = st.selectbox(
             "Select Job",
             job_options["display"].tolist(),
@@ -684,76 +684,32 @@ with tab_job_requirements:
             f"Region: {region_format(str(selected_job['region_code']))}"
         )
 
-        rc_display = resource_options_df()
+        rc_df = resource_options_df()
 
-        if "job_req_reset_counter" not in st.session_state:
-            st.session_state["job_req_reset_counter"] = 0
-        job_req_reset_counter = st.session_state["job_req_reset_counter"]
-        job_req_key_suffix = f"{ACTIVE_REGION}_{int(selected_job['id'])}_{job_req_reset_counter}"
+        base_df = rc_df[["class_name"]].rename(columns={"class_name": "Class"})
+        base_df["Quantity"] = 0.0
+        base_df["Before"] = 0
+        base_df["After"] = 0
+        base_df["Priority"] = "Normal"
+        base_df["Notes"] = ""
 
-        c1, c2, c3 = st.columns(3)
-        selected_rc_display = c1.selectbox(
-            "Resource Class",
-            rc_display["display"].tolist(),
-            key=f"job_req_rc_{job_req_key_suffix}",
-        )
-        selected_rc = rc_display.loc[rc_display["display"] == selected_rc_display].iloc[0]
+        edited = st.data_editor(base_df, num_rows="dynamic", key="job_req_editor")
 
-        step = quantity_step(str(selected_rc["unit_type"]), str(selected_rc["category"]))
-        fmt = quantity_format(str(selected_rc["unit_type"]), str(selected_rc["category"]))
-
-        quantity_required = c2.number_input(
-            f"Quantity Required ({selected_rc['unit_type']})",
-            min_value=0.0,
-            value=step,
-            step=step,
-            format=fmt,
-            key=f"job_req_qty_{job_req_key_suffix}",
-        )
-        priority = c3.selectbox(
-            "Priority",
-            ["Low", "Normal", "High", "Critical"],
-            index=1,
-            key=f"job_req_priority_{job_req_key_suffix}",
-        )
-
-        c4, c5 = st.columns(2)
-        days_before_job_start = c4.number_input(
-            "Days Before Job Start",
-            min_value=0,
-            value=0,
-            step=1,
-            key=f"job_req_before_{job_req_key_suffix}",
-        )
-        days_after_job_end = c5.number_input(
-            "Days After Job End",
-            min_value=0,
-            value=0,
-            step=1,
-            key=f"job_req_after_{job_req_key_suffix}",
-        )
-
-        req_notes = st.text_area("Notes", key=f"job_req_notes_{job_req_key_suffix}")
-
-        req_start = pd.to_datetime(selected_job["job_start_date"]).date() - pd.Timedelta(days=int(days_before_job_start))
-        req_end = pd.to_datetime(selected_job["job_end_date"]).date() + pd.Timedelta(days=int(days_after_job_end))
-        st.info(f"Requirement Window: {format_date_value(req_start)} to {format_date_value(req_end)}")
-
-        if st.button("Add Requirement to Selected Job", key=f"job_req_submit_{job_req_key_suffix}"):
-            create_requirement(
-                engine,
-                {
-                    "job_id": int(selected_job["id"]),
-                    "resource_class_id": int(selected_rc["id"]),
-                    "quantity_required": float(quantity_required),
-                    "days_before_job_start": int(days_before_job_start),
-                    "days_after_job_end": int(days_after_job_end),
-                    "priority": priority,
-                    "notes": req_notes,
-                },
-            )
-            st.success("Requirement added.")
-            st.session_state["job_req_reset_counter"] += 1
+        if st.button("Save All Requirements"):
+            for _, r in edited.iterrows():
+                if float(r["Quantity"]) > 0:
+                    rc_match = rc_df.loc[rc_df["class_name"] == r["Class"]]
+                    if not rc_match.empty:
+                        create_requirement(engine, {
+                            "job_id": int(selected_job["id"]),
+                            "resource_class_id": int(rc_match.iloc[0]["id"]),
+                            "quantity_required": float(r["Quantity"]),
+                            "days_before_job_start": int(r["Before"]),
+                            "days_after_job_end": int(r["After"]),
+                            "priority": r["Priority"],
+                            "notes": r["Notes"],
+                        })
+            st.success("Requirements saved")
             st.rerun()
 
         st.subheader("Selected Job Requirement Summary")
@@ -774,7 +730,7 @@ with tab_job_requirements:
                 ]
             ).copy()
             display_req.columns = ["Class Name", "Quantity Required", "Required Start", "Required End"]
-            st.dataframe(display_req, width="stretch")
+            st.dataframe(display_req.style.set_properties(subset=["Quantity Required"], **{"text-align": "center"}), width="stretch")
             render_requirements_manage_table(selected_job_reqs, key_prefix="jobreq")
 
 with tab_requirements:
@@ -783,7 +739,7 @@ with tab_requirements:
     if jobs_df.empty:
         st.warning("Create a job first.")
     else:
-        job_options = jobs_df.assign(display=jobs_df["job_code"] + " | " + jobs_df["job_name"])
+        job_options = jobs_df.assign(display=jobs_df["customer"].fillna("Unassigned") + " | " + jobs_df["job_name"] + " | " + jobs_df["job_code"])
         rc_display = resource_options_df()
 
         if "create_req_reset_counter" not in st.session_state:
@@ -871,7 +827,7 @@ with tab_requirements:
     else:
         display_req = format_dates_for_display(req_summary[["job_code","job_name","region_code","class_name","quantity_required","unit_type","required_start","required_end","quantity_assigned","quantity_shortfall","allocation_status"]])
         display_req["region_code"] = display_req["region_code"].map(lambda x: region_format(str(x)))
-        st.dataframe(display_req, width="stretch")
+        st.dataframe(display_req.style.set_properties(subset=["Quantity Required"], **{"text-align": "center"}), width="stretch")
         render_requirements_manage_table(req_summary)
 
 with tab_pools:
@@ -978,7 +934,7 @@ with tab_allocations:
     else:
         display_req = format_dates_for_display(req_summary[["job_code","job_name","region_code","class_name","quantity_required","quantity_assigned","quantity_shortfall","allocation_status"]])
         display_req["region_code"] = display_req["region_code"].map(lambda x: region_format(str(x)))
-        st.dataframe(display_req, width="stretch")
+        st.dataframe(display_req.style.set_properties(subset=["Quantity Required"], **{"text-align": "center"}), width="stretch")
     st.subheader("Fulfillment Rows")
     if ful.empty:
         st.info("No fulfillment rows yet.")
