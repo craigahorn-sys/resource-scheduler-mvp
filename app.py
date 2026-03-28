@@ -20,6 +20,22 @@ st.set_page_config(page_title="Resource Scheduler V2", layout="wide")
 st.title("Resource Scheduler V2")
 st.caption("Priority-based scheduling with region-scoped workflow and pop-up row management.")
 
+st.markdown(
+    '''
+    <style>
+    div[data-testid="stDataEditor"] [data-testid="stDataFrameResizable"] table td:nth-child(2),
+    div[data-testid="stDataEditor"] [data-testid="stDataFrameResizable"] table td:nth-child(3),
+    div[data-testid="stDataEditor"] [data-testid="stDataFrameResizable"] table td:nth-child(4),
+    div[data-testid="stDataEditor"] [data-testid="stDataFrameResizable"] table th:nth-child(2),
+    div[data-testid="stDataEditor"] [data-testid="stDataFrameResizable"] table th:nth-child(3),
+    div[data-testid="stDataEditor"] [data-testid="stDataFrameResizable"] table th:nth-child(4) {
+        text-align: center !important;
+    }
+    </style>
+    ''',
+    unsafe_allow_html=True,
+)
+
 engine = get_engine()
 init_db(engine)
 
@@ -259,6 +275,15 @@ def format_compact_number(val):
         return str(int(round(f)))
     s = f"{f:.3f}".rstrip("0").rstrip(".")
     return "0" if s == "-0" else s
+
+def format_editor_quantity(val):
+    try:
+        f = float(val)
+    except Exception:
+        return ""
+    if abs(f) < 1e-12:
+        return "0"
+    return f"{f:.3f}".rstrip("0").rstrip(".")
 
 
 def availability_font_color(val):
@@ -700,6 +725,10 @@ with tab_job_requirements:
         editor_df["Notes"] = ""
 
         st.markdown("##### Add Requirements for Selected Job")
+        editor_df["Quantity"] = editor_df["Quantity"].map(format_editor_quantity)
+        editor_df["Days Before"] = editor_df["Days Before"].astype(int).astype(str)
+        editor_df["Days After"] = editor_df["Days After"].astype(int).astype(str)
+
         edited = st.data_editor(
             editor_df,
             num_rows="dynamic",
@@ -712,25 +741,16 @@ with tab_job_requirements:
                     required=True,
                     width="medium",
                 ),
-                "Quantity": st.column_config.NumberColumn(
+                "Quantity": st.column_config.TextColumn(
                     "Quantity",
-                    min_value=0.0,
-                    step=0.125,
-                    format="%.3f",
                     width="small",
                 ),
-                "Days Before": st.column_config.NumberColumn(
+                "Days Before": st.column_config.TextColumn(
                     "Days Before",
-                    min_value=0,
-                    step=1,
-                    format="%d",
                     width="small",
                 ),
-                "Days After": st.column_config.NumberColumn(
+                "Days After": st.column_config.TextColumn(
                     "Days After",
-                    min_value=0,
-                    step=1,
-                    format="%d",
                     width="small",
                 ),
                 "Priority": st.column_config.SelectboxColumn(
@@ -751,9 +771,18 @@ with tab_job_requirements:
             rows_saved = 0
             for _, r in edited.iterrows():
                 try:
-                    qty = float(r["Quantity"])
+                    qty = float(str(r["Quantity"]).strip() or "0")
                 except Exception:
                     qty = 0.0
+                try:
+                    days_before = int(float(str(r["Days Before"]).strip() or "0"))
+                except Exception:
+                    days_before = 0
+                try:
+                    days_after = int(float(str(r["Days After"]).strip() or "0"))
+                except Exception:
+                    days_after = 0
+
                 if qty <= 0:
                     continue
 
@@ -767,8 +796,8 @@ with tab_job_requirements:
                         "job_id": int(selected_job["id"]),
                         "resource_class_id": int(rc_match.iloc[0]["id"]),
                         "quantity_required": qty,
-                        "days_before_job_start": int(r["Days Before"]),
-                        "days_after_job_end": int(r["Days After"]),
+                        "days_before_job_start": days_before,
+                        "days_after_job_end": days_after,
                         "priority": r["Priority"],
                         "notes": str(r["Notes"]) if pd.notna(r["Notes"]) else "",
                     },
@@ -788,22 +817,40 @@ with tab_job_requirements:
         if selected_job_reqs.empty:
             st.info("No requirements yet for this job.")
         else:
-            display_req = format_dates_for_display(
-                selected_job_reqs[
-                    [
-                        "class_name",
-                        "quantity_required",
-                        "required_start",
-                        "required_end",
-                    ]
+            display_req = selected_job_reqs[
+                [
+                    "class_name",
+                    "quantity_required",
+                    "required_start",
+                    "required_end",
                 ]
-            ).copy()
+            ].copy()
+            display_req["quantity_required"] = display_req["quantity_required"].map(format_compact_number)
+            display_req = format_dates_for_display(display_req)
             display_req.columns = ["Class Name", "Quantity Required", "Required Start", "Required End"]
-            styled_req = display_req.style.set_properties(
-                subset=["Quantity Required"],
-                **{"text-align": "center"}
+
+            html_rows = []
+            for _, rec in display_req.iterrows():
+                html_rows.append(
+                    f"<tr>"
+                    f"<td style='padding:8px 10px;border-bottom:1px solid #e6e6e6;'>{rec['Class Name']}</td>"
+                    f"<td style='padding:8px 10px;border-bottom:1px solid #e6e6e6;text-align:center;'>{rec['Quantity Required']}</td>"
+                    f"<td style='padding:8px 10px;border-bottom:1px solid #e6e6e6;'>{rec['Required Start']}</td>"
+                    f"<td style='padding:8px 10px;border-bottom:1px solid #e6e6e6;'>{rec['Required End']}</td>"
+                    f"</tr>"
+                )
+
+            st.markdown(
+                "<table style='width:100%;border-collapse:collapse;'>"
+                "<thead><tr>"
+                "<th style='text-align:left;padding:8px 10px;border-bottom:2px solid #d0d0d0;'>Class Name</th>"
+                "<th style='text-align:center;padding:8px 10px;border-bottom:2px solid #d0d0d0;'>Quantity Required</th>"
+                "<th style='text-align:left;padding:8px 10px;border-bottom:2px solid #d0d0d0;'>Required Start</th>"
+                "<th style='text-align:left;padding:8px 10px;border-bottom:2px solid #d0d0d0;'>Required End</th>"
+                "</tr></thead>"
+                "<tbody>" + "".join(html_rows) + "</tbody></table>",
+                unsafe_allow_html=True,
             )
-            st.dataframe(styled_req, width="stretch")
             render_requirements_manage_table(selected_job_reqs, key_prefix="jobreq")
 
 with tab_requirements:
