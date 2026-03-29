@@ -368,11 +368,14 @@ def create_rental_requirement(engine, data: dict):
                 :job_id, :resource_class_id, :quantity_required, :days_before_job_start, :days_after_job_end, :vendor_name, :notes
             ) RETURNING id
         """), data)
-        return int(res.scalar_one())
+        rental_requirement_id = int(res.scalar_one())
+    recalc_all_requirements(engine)
+    return rental_requirement_id
 
 
 def delete_rental_requirement(engine, rental_requirement_id: int):
     execute(engine, "DELETE FROM job_rental_requirements WHERE id=:id", {"id": int(rental_requirement_id)})
+    recalc_all_requirements(engine)
 
 
 def rental_requirement_summary_df(engine):
