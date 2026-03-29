@@ -231,6 +231,8 @@ def requirement_summary_df(engine):
             rc.class_name, rc.unit_type,
             jr.quantity_required, jr.days_before_job_start, jr.days_after_job_end, jr.priority, jr.notes,
             j.job_start_date, j.job_duration_days, j.mob_days_before_job, j.demob_days_after_job,
+            COALESCE(SUM(CASE WHEN rf.fulfillment_type='internal_pool' THEN rf.quantity_assigned ELSE 0 END),0) AS owned_assigned,
+            COALESCE(SUM(CASE WHEN rf.fulfillment_type='rental_generic' THEN rf.quantity_assigned ELSE 0 END),0) AS rental_assigned,
             COALESCE(SUM(rf.quantity_assigned),0) AS quantity_assigned
         FROM job_requirements jr
         JOIN jobs j ON jr.job_id=j.id
@@ -251,6 +253,14 @@ def requirement_summary_df(engine):
         ends.append((pd.to_datetime(dates["job_end_date"]) + pd.Timedelta(days=int(r["days_after_job_end"]))).date())
     df["required_start"] = starts
     df["required_end"] = ends
+    if "owned_assigned" in df.columns:
+        df["owned_assigned"] = df["owned_assigned"].astype(float)
+    else:
+        df["owned_assigned"] = 0.0
+    if "rental_assigned" in df.columns:
+        df["rental_assigned"] = df["rental_assigned"].astype(float)
+    else:
+        df["rental_assigned"] = 0.0
     df["quantity_assigned"] = df["quantity_assigned"].astype(float)
     df["quantity_shortfall"] = (df["quantity_required"].astype(float) - df["quantity_assigned"]).clip(lower=0)
     def status(row):
@@ -347,6 +357,70 @@ def pool_snapshot_df(engine, as_of_date):
     df["pool_status"] = pool_status
     return df[["id","region_code","resource_class_id","class_name","category","unit_type","base_quantity","adjustment_total","total_pool","committed_quantity","available_quantity","pool_status"]]
 
+
+
+def create_rental_requirement(engine, data: dict):
+    with engine.begin() as conn:
+        res = conn.execute(text("""
+            INSERT INTO job_rental_requirements(
+                job_id, resource_class_id, quantity_required, days_before_job_start, days_after_job_end, vendor_name, notes
+            ) VALUES (
+                :job_id, :resource_class_id, :quantity_required, :days_before_job_start, :days_after_job_end, :vendor_name, :notes
+            ) RETURNING id
+        """), data)
+        return int(res.scalar_one())
+
+
+def delete_rental_requirement(engine, rental_requirement_id: int):
+    execute(engine, "DELETE FROM job_rental_requirements WHERE id=:id", {"id": int(rental_requirement_id)})
+
+
+def rental_requirement_summary_df(engine):
+    df = query_df(engine, """
+        SELECT
+            rr.id,
+            rr.job_id,
+            rr.resource_class_id,
+            j.job_code,
+            j.job_name,
+            j.region_code,
+            COALESCE(j.customer, '') AS customer,
+            COALESCE(j.customer_color, '') AS customer_color,
+            rc.class_name,
+            rc.unit_type,
+            rr.quantity_required,
+            rr.days_before_job_start,
+            rr.days_after_job_end,
+            rr.vendor_name,
+            rr.notes,
+            j.job_start_date,
+            j.job_duration_days,
+            j.mob_days_before_job,
+            j.demob_days_after_job
+        FROM job_rental_requirements rr
+        JOIN jobs j ON rr.job_id = j.id
+        JOIN resource_classes rc ON rr.resource_class_id = rc.id
+        ORDER BY rr.id DESC
+    """)
+    if df.empty:
+        return df
+    starts, ends = [], []
+    for _, r in df.iterrows():
+        dates = calc_job_dates(
+            r["job_start_date"],
+            int(r["job_duration_days"]),
+            int(r["mob_days_before_job"]),
+            int(r["demob_days_after_job"]),
+        )
+        starts.append((pd.to_datetime(dates["job_start_date"]) - pd.Timedelta(days=int(r["days_before_job_start"]))).date())
+        ends.append((pd.to_datetime(dates["job_end_date"]) + pd.Timedelta(days=int(r["days_after_job_end"]))).date())
+    df["required_start"] = starts
+    df["required_end"] = ends
+    return df
+
+
+def get_rental_requirements_df(engine):
+    return rental_requirement_summary_df(engine)
 
 def allocation_debug_df(engine):
     req = _requirement_base_df(engine)

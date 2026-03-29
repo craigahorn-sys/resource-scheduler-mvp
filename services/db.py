@@ -18,8 +18,7 @@ RESOURCE_CLASSES = [
     ('10" Clamps', 'Clamps', 'count', 'quantity_only'), ('12" Clamps', 'Clamps', 'count', 'quantity_only'),
     ('14" Clamps', 'Clamps', 'count', 'quantity_only'), ('16" Clamps', 'Clamps', 'count', 'quantity_only'),
     ('Low-Profile Road Crossings', 'Road Crossings', 'count', 'quantity_only'), ('12" Road Crossings', 'Road Crossings', 'count', 'quantity_only'),
-    ('16" Road Crossings', 'Road Crossings', 'count', 'quantity_only'), ('Rental Hose Placeholder', 'Rental', 'miles', 'quantity_only'),
-    ('Operators', 'Personnel', 'people', 'quantity_then_specific'), ('Trucks', 'Vehicles', 'units', 'quantity_then_specific'),
+    ('16" Road Crossings', 'Road Crossings', 'count', 'quantity_only'), ('Operators', 'Personnel', 'people', 'quantity_then_specific'), ('Trucks', 'Vehicles', 'units', 'quantity_then_specific'),
     ('4x3 Pumps', 'Pumps', 'units', 'quantity_then_specific'), ('4x4 Pumps', 'Pumps', 'units', 'quantity_then_specific'),
     ('6x3 Pumps', 'Pumps', 'units', 'quantity_then_specific'), ('Super 6x4 Pumps', 'Pumps', 'units', 'quantity_then_specific'),
     ('6x6 Pumps', 'Pumps', 'units', 'quantity_then_specific'), ('10x8 Pumps', 'Pumps', 'units', 'quantity_then_specific'),
@@ -29,9 +28,7 @@ RESOURCE_CLASSES = [
     ('12" Filter Pods', 'Filtration', 'units', 'quantity_then_specific'), ('375 Air Compressor', 'Air', 'units', 'quantity_then_specific'),
     ('750 Air Compressor', 'Air', 'units', 'quantity_then_specific'), ('900 Air Compressor', 'Air', 'units', 'quantity_then_specific'),
     ('1200 Air Compressor', 'Air', 'units', 'quantity_then_specific'), ('Doghouses', 'Support', 'units', 'quantity_then_specific'),
-    ('Rental Pump Placeholder', 'Rental', 'units', 'quantity_then_specific'), ('Rental Truck Placeholder', 'Rental', 'units', 'quantity_then_specific'),
-    ('Rental Filter Pod Placeholder', 'Rental', 'units', 'quantity_then_specific')
-]
+    ]
 
 REGIONS = [('RM', 'Rockies', True), ('PM', 'Permian', True), ('ST', 'South Texas', True)]
 
