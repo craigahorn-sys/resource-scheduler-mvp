@@ -387,6 +387,51 @@ def week_start_label(ts: pd.Timestamp) -> str:
     return f"{ts.strftime('%b')} {ts.day}-{week_end.strftime('%b')} {week_end.day}"
 
 
+def compute_planning_segments(req: pd.DataFrame, x0, num_weeks: int):
+    x0 = pd.to_datetime(x0).normalize()
+    x_end = x0 + pd.Timedelta(days=7 * num_weeks)
+
+    change_points = {x0, x_end}
+    if not req.empty:
+        for _, row in req.iterrows():
+            start = pd.to_datetime(row["required_start"]).normalize()
+            end_next = pd.to_datetime(row["required_end"]).normalize() + pd.Timedelta(days=1)
+            if x0 <= start <= x_end:
+                change_points.add(start)
+            if x0 <= end_next <= x_end:
+                change_points.add(end_next)
+
+    weekly_lines = [x0 + pd.Timedelta(days=7 * i) for i in range(num_weeks)] + [x_end]
+    filtered_weekly = []
+    for ws in weekly_lines:
+        too_close = any(abs((ws - cp).days) <= 3 for cp in change_points if cp != ws)
+        if not too_close:
+            filtered_weekly.append(ws)
+
+    gridlines = sorted(change_points | set(filtered_weekly))
+    segment_starts = sorted(change_points)
+    segments = []
+    for i in range(len(segment_starts) - 1):
+        seg_start = segment_starts[i]
+        seg_end = segment_starts[i + 1]
+        if seg_end > seg_start:
+            segments.append((seg_start, seg_end))
+
+    tickvals = []
+    ticktext = []
+    for seg_start, seg_end in segments:
+        mid = seg_start + (seg_end - seg_start) / 2
+        last_day = (seg_end - pd.Timedelta(days=1)).normalize()
+        if seg_start.month == last_day.month:
+            label = f"{seg_start.strftime('%b')} {seg_start.day}-{last_day.day}"
+        else:
+            label = f"{seg_start.strftime('%b')} {seg_start.day}-{last_day.strftime('%b')} {last_day.day}"
+        tickvals.append(mid)
+        ticktext.append(label)
+
+    return gridlines, segments, tickvals, ticktext, x_end
+
+
 def build_planning_board_data(active_region: str, selected_class: str | None, start_date, num_weeks: int):
     req = region_filter(requirement_summary_df(engine), active_region)
     if req.empty:
@@ -461,19 +506,19 @@ def build_planning_board_data(active_region: str, selected_class: str | None, st
         )
     board_df = pd.DataFrame(rows)
 
+    gridlines, segments, tickvals, ticktext, x_end = compute_planning_segments(req, start_ts, num_weeks)
+
     summary_rows = []
-    for week_label, week_start, (wk_start, wk_end) in zip(week_labels, week_starts, week_ranges):
-        need = in_region = shortfall = 0.0
+    for seg_start, seg_end in segments:
+        need = 0.0
+        seg_last_day = (seg_end - pd.Timedelta(days=1)).normalize()
 
         for _, row in req.iterrows():
-            overlaps = pd.to_datetime(row["required_start"]) <= wk_end and pd.to_datetime(row["required_end"]) >= wk_start
+            overlaps = pd.to_datetime(row["required_start"]) <= seg_last_day and pd.to_datetime(row["required_end"]) >= seg_start
             if overlaps:
                 need += float(row["quantity_required"])
-                in_region += float(row["quantity_assigned"])
-                shortfall += float(row["quantity_shortfall"])
 
-        snap = region_filter(pool_snapshot_df(engine, as_of_date=wk_start.date()), active_region)
-        availability = 0.0
+        snap = region_filter(pool_snapshot_df(engine, as_of_date=seg_start.date()), active_region)
         total_pool = 0.0
         if not snap.empty:
             snap_match = snap.loc[snap["class_name"] == selected_class]
@@ -481,15 +526,16 @@ def build_planning_board_data(active_region: str, selected_class: str | None, st
                 total_pool = float(snap_match["total_pool"].iloc[0])
 
         availability = total_pool - need
+        segment_mid = seg_start + (seg_end - seg_start) / 2
 
         summary_rows.extend([
-            {"Metric": "Need", "Week": week_label, "WeekStart": week_start, "Value": need},
-            {"Metric": "In Region", "Week": week_label, "WeekStart": week_start, "Value": total_pool},
-            {"Metric": "Availability", "Week": week_label, "WeekStart": week_start, "Value": availability},
+            {"Metric": "Need", "SegmentStart": seg_start, "SegmentEnd": seg_end, "X": segment_mid, "Value": need},
+            {"Metric": "In Region", "SegmentStart": seg_start, "SegmentEnd": seg_end, "X": segment_mid, "Value": total_pool},
+            {"Metric": "Availability", "SegmentStart": seg_start, "SegmentEnd": seg_end, "X": segment_mid, "Value": availability},
         ])
 
     summary_df = pd.DataFrame(summary_rows)
-    return board_df, summary_df, week_labels, week_starts, selected_class
+    return board_df, summary_df, gridlines, tickvals, ticktext, x_end, selected_class
 
 
 def render_planning_board(active_region: str):
@@ -502,12 +548,16 @@ def render_planning_board(active_region: str):
     class_options = req_all["class_name"].dropna().astype(str).unique().tolist()
     class_options.sort()
 
+    planning_class_key = f"planning_class_{active_region}"
+    if planning_class_key not in st.session_state or st.session_state[planning_class_key] not in class_options:
+        st.session_state[planning_class_key] = class_options[0]
+
     c1, c2, c3 = st.columns([1.6, 1, 1])
-    selected_class = c1.selectbox("Resource View", class_options, key="planning_class")
+    selected_class = c1.selectbox("Resource View", class_options, key=planning_class_key)
     board_start = c2.date_input("Board Start", value=date.today(), key="planning_start")
     num_weeks = c3.selectbox("Weeks", [8, 10, 12, 16], index=2, key="planning_weeks")
 
-    board_df, summary_df, week_labels, week_starts, selected_class = build_planning_board_data(
+    board_df, summary_df, gridlines, tickvals, ticktext, x_end, selected_class = build_planning_board_data(
         active_region=active_region,
         selected_class=selected_class,
         start_date=board_start,
@@ -523,10 +573,9 @@ def render_planning_board(active_region: str):
     total_rows = total_job_rows + 1 + len(summary_metrics)
 
     fig = go.Figure()
-    x0 = pd.to_datetime(week_starts[0])
-    x_end = pd.to_datetime(week_starts[-1]) + pd.Timedelta(days=7)
+    x0 = pd.to_datetime(board_start).normalize()
 
-    for ws in week_starts + [x_end]:
+    for ws in gridlines:
         fig.add_vline(x=ws, line_width=1, line_color="rgba(120,120,120,0.40)")
     for y in [i + 0.5 for i in range(total_rows + 1)]:
         width = 2 if abs(y - (len(summary_metrics) + 0.5)) < 1e-9 else 1
@@ -574,7 +623,7 @@ def render_planning_board(active_region: str):
     if not summary_df.empty:
         for _, rec in summary_df.iterrows():
             y = summary_y[rec["Metric"]]
-            x = pd.to_datetime(rec["WeekStart"]) + pd.Timedelta(days=3.5)
+            x = pd.to_datetime(rec["X"])
             val = float(rec["Value"])
             txt = format_compact_number(val)
 
@@ -609,8 +658,8 @@ def render_planning_board(active_region: str):
 
     fig.update_xaxes(
         tickmode="array",
-        tickvals=week_starts,
-        ticktext=week_labels,
+        tickvals=tickvals,
+        ticktext=ticktext,
         side="top",
         showgrid=False,
         range=[x0, x_end],
