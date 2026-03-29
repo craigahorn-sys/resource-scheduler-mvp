@@ -126,9 +126,9 @@ def quantity_step(unit_type: str, category: str) -> float:
 def quantity_format(unit_type: str, category: str) -> str:
     return "%.3f" if quantity_step(unit_type, category) == 0.125 else "%.0f"
 
-def resource_options_df() -> pd.DataFrame:
+def resource_options_df(include_rental: bool = False) -> pd.DataFrame:
     rc = resource_classes_df.copy()
-    if "category" in rc.columns:
+    if not include_rental and "category" in rc.columns:
         rc = rc.loc[rc["category"].astype(str) != "Rental"].copy()
     rc["display"] = rc["class_name"]
     return rc
@@ -207,7 +207,7 @@ def render_requirements_manage_table(df: pd.DataFrame, key_prefix: str = 'req'):
     for c, h in zip(hdr, headers):
         c.markdown(f"**{h}**")
 
-    rc_df = resource_options_df()
+    rc_df = resource_options_df(include_rental=True)
 
     for _, row in df.iterrows():
         cols = st.columns(widths)
@@ -220,7 +220,8 @@ def render_requirements_manage_table(df: pd.DataFrame, key_prefix: str = 'req'):
         cols[6].write(str(row["allocation_status"]))
 
         with cols[7].popover("Edit/Delete", use_container_width=True):
-            current_idx = rc_df["class_name"].tolist().index(row["class_name"])
+            rc_names = rc_df["class_name"].tolist()
+            current_idx = rc_names.index(row["class_name"]) if row["class_name"] in rc_names else 0
             edit_rc_display = st.selectbox(
                 "Resource Class",
                 rc_df["display"].tolist(),
@@ -840,7 +841,7 @@ with tab_job_requirements:
             f"Region: {region_format(str(selected_job['region_code']))}"
         )
 
-        rc_df = resource_options_df().copy()
+        rc_df = resource_options_df(include_rental=False).copy()
 
         if "job_req_editor_reset_counter" not in st.session_state:
             st.session_state["job_req_editor_reset_counter"] = 0
