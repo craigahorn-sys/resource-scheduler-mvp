@@ -409,25 +409,15 @@ def compute_planning_segments(req: pd.DataFrame, x0, num_weeks: int):
             filtered_weekly.append(ws)
 
     gridlines = sorted(change_points | set(filtered_weekly))
-    segment_starts = sorted(change_points)
     segments = []
-    for i in range(len(segment_starts) - 1):
-        seg_start = segment_starts[i]
-        seg_end = segment_starts[i + 1]
+    for i in range(len(gridlines) - 1):
+        seg_start = gridlines[i]
+        seg_end = gridlines[i + 1]
         if seg_end > seg_start:
             segments.append((seg_start, seg_end))
 
-    tickvals = []
-    ticktext = []
-    for seg_start, seg_end in segments:
-        mid = seg_start + (seg_end - seg_start) / 2
-        last_day = (seg_end - pd.Timedelta(days=1)).normalize()
-        if seg_start.month == last_day.month:
-            label = f"{seg_start.strftime('%b')} {seg_start.day}-{last_day.day}"
-        else:
-            label = f"{seg_start.strftime('%b')} {seg_start.day}-{last_day.strftime('%b')} {last_day.day}"
-        tickvals.append(mid)
-        ticktext.append(label)
+    tickvals = gridlines
+    ticktext = [pd.to_datetime(ts).strftime("%b %-d") for ts in gridlines]
 
     return gridlines, segments, tickvals, ticktext, x_end
 
@@ -663,7 +653,8 @@ def render_planning_board(active_region: str):
         side="top",
         showgrid=False,
         range=[x0, x_end],
-        tickfont=dict(size=11),
+        tickfont=dict(size=10),
+        tickangle=-30,
         fixedrange=True,
     )
     fig.update_yaxes(
