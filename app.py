@@ -586,18 +586,25 @@ def build_planning_board_data(active_region: str, selected_class: str | None, st
         job_rent = rental_df[(rental_df["job_code"] == rec["job_code"])] if not rental_df.empty else pd.DataFrame()
         job_manual = manual_df[(manual_df["job_code"] == rec["job_code"])] if not manual_df.empty else pd.DataFrame()
 
+        required_qty = float(job_req["quantity_required"].astype(float).sum()) if not job_req.empty else 0.0
         ees_qty = float(job_manual["quantity_assigned"].astype(float).sum()) if not job_manual.empty else float(job_req["quantity_assigned"].astype(float).sum()) if not job_req.empty else 0.0
         rental_qty = float(job_rent["quantity_required"].astype(float).sum()) if not job_rent.empty else 0.0
         vendors = ", ".join(sorted(set(v for v in job_rent.get("vendor_name", pd.Series(dtype=str)).fillna("").tolist() if str(v).strip())))
 
         parts = [str(rec["job_name"])]
+        if required_qty > 0:
+            parts.append(f"{format_compact_number(required_qty)} {rec['unit_type']}")
+
+        breakdown_parts = []
         if ees_qty > 0:
-            parts.append(f"{format_compact_number(ees_qty)} {rec['unit_type']} EES")
+            breakdown_parts.append(f"{format_compact_number(ees_qty)} EES")
         if rental_qty > 0:
-            rental_text = f"{format_compact_number(rental_qty)} {rec['unit_type']} Rental"
+            rental_text = f"{format_compact_number(rental_qty)} Rental"
             if vendors:
                 rental_text += f", {vendors}"
-            parts.append(rental_text)
+            breakdown_parts.append(rental_text)
+        if breakdown_parts:
+            parts.append(f"({ ' / '.join(breakdown_parts) })")
 
         rows.append(
             {
