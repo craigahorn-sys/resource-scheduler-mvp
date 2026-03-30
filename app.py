@@ -21,7 +21,6 @@ from services.scheduler import (
 
 st.set_page_config(page_title="Resource Scheduler V2", layout="wide")
 st.title("Resource Scheduler V2")
-st.caption("Priority-based scheduling with region-scoped workflow and pop-up row management.")
 
 st.markdown(
     '''
@@ -805,17 +804,26 @@ def render_planning_board(active_region: str):
 
 with st.sidebar:
     st.header("Workspace")
-    region_options = ["Select a region..."] + regions_df["region_code"].tolist()
+
+    region_options = ["Select a region...", "Global"] + regions_df["region_code"].tolist()
+
     ACTIVE_REGION = st.selectbox(
         "Active Region",
         region_options,
-        format_func=lambda x: "Select a region..." if x == "Select a region..." else region_format(x),
+        format_func=lambda x: (
+            "Select a region..." if x == "Select a region..."
+            else "Global" if x == "Global"
+            else region_format(x)
+        ),
         key="active_region_selector",
     )
+
     if ACTIVE_REGION == "Select a region...":
         st.warning("Select an Active Region to continue.")
         st.stop()
-    st.caption(region_format(ACTIVE_REGION))
+
+    st.caption("Showing all regions" if ACTIVE_REGION == "Global" else region_format(ACTIVE_REGION))
+
     if st.button("Rebalance All Allocations", type="primary"):
         recalc_all_requirements(engine)
         st.success("Rebalanced")
