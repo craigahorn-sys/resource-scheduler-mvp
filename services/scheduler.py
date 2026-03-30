@@ -124,6 +124,7 @@ def _windows_overlap(start_a, end_a, start_b, end_b) -> bool:
 
 def recalc_all_requirements(engine):
     req = _requirement_base_df(engine)
+    manual_df = _manual_owned_allocations_base_df(engine)
     with engine.begin() as conn:
         conn.execute(text("DELETE FROM requirement_fulfillment WHERE fulfillment_type='internal_pool'"))
         if req.empty:
@@ -139,8 +140,22 @@ def recalc_all_requirements(engine):
                 if _windows_overlap(row["required_start"], row["required_end"], alloc["required_start"], alloc["required_end"]):
                     overlapping_committed += float(alloc["quantity_assigned"])
             available = max(float(total_pool) - float(overlapping_committed), 0.0)
-            assign_qty = min(float(row["quantity_required"]), available)
+
+            manual_target = None
+            if not manual_df.empty:
+                manual_match = manual_df[
+                    (manual_df["job_id"] == row["job_id"]) &
+                    (manual_df["resource_class_id"] == row["resource_class_id"]) &
+                    (pd.to_datetime(manual_df["required_start"]) <= pd.to_datetime(row["required_end"])) &
+                    (pd.to_datetime(manual_df["required_end"]) >= pd.to_datetime(row["required_start"]))
+                ]
+                if not manual_match.empty:
+                    manual_target = float(manual_match["quantity_assigned"].astype(float).sum())
+
+            target_qty = float(row["quantity_required"]) if manual_target is None else min(float(row["quantity_required"]), float(manual_target))
+            assign_qty = min(target_qty, available)
             if assign_qty > 0:
+                note_prefix = "Manual EES override" if manual_target is not None else "Auto-allocated by priority"
                 conn.execute(text("""
                     INSERT INTO requirement_fulfillment(
                         requirement_id, fulfillment_type, source_name, specific_resource_name, quantity_assigned, notes
@@ -148,7 +163,7 @@ def recalc_all_requirements(engine):
                 """), {
                     "rid": int(row["id"]),
                     "q": float(assign_qty),
-                    "notes": f"Auto-allocated by priority. Pool={float(total_pool):.2f}, overlap_committed={float(overlapping_committed):.2f}, available={float(available):.2f}"
+                    "notes": f"{note_prefix}. Pool={float(total_pool):.2f}, overlap_committed={float(overlapping_committed):.2f}, available={float(available):.2f}, target={float(target_qty):.2f}"
                 })
                 allocations_by_bucket.setdefault(bucket, []).append({
                     "requirement_id": int(row["id"]),
