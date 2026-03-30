@@ -586,25 +586,18 @@ def build_planning_board_data(active_region: str, selected_class: str | None, st
         job_rent = rental_df[(rental_df["job_code"] == rec["job_code"])] if not rental_df.empty else pd.DataFrame()
         job_manual = manual_df[(manual_df["job_code"] == rec["job_code"])] if not manual_df.empty else pd.DataFrame()
 
-        required_qty = float(job_req["quantity_required"].astype(float).sum()) if not job_req.empty else 0.0
         ees_qty = float(job_manual["quantity_assigned"].astype(float).sum()) if not job_manual.empty else float(job_req["quantity_assigned"].astype(float).sum()) if not job_req.empty else 0.0
         rental_qty = float(job_rent["quantity_required"].astype(float).sum()) if not job_rent.empty else 0.0
         vendors = ", ".join(sorted(set(v for v in job_rent.get("vendor_name", pd.Series(dtype=str)).fillna("").tolist() if str(v).strip())))
 
         parts = [str(rec["job_name"])]
-        if required_qty > 0:
-            parts.append(f"{format_compact_number(required_qty)} {rec['unit_type']}")
-
-        breakdown_parts = []
         if ees_qty > 0:
-            breakdown_parts.append(f"{format_compact_number(ees_qty)} EES")
+            parts.append(f"{format_compact_number(ees_qty)} {rec['unit_type']} EES")
         if rental_qty > 0:
-            rental_text = f"{format_compact_number(rental_qty)} Rental"
+            rental_text = f"{format_compact_number(rental_qty)} {rec['unit_type']} Rental"
             if vendors:
                 rental_text += f", {vendors}"
-            breakdown_parts.append(rental_text)
-        if breakdown_parts:
-            parts.append(f"({ ' / '.join(breakdown_parts) })")
+            parts.append(rental_text)
 
         rows.append(
             {
@@ -934,8 +927,21 @@ with tab_job_requirements:
             display=jobs_for_display["customer"] + " | " + jobs_for_display["job_name"] + " | " + jobs_for_display["job_code"]
         ).sort_values(["customer", "job_name", "job_code"])
 
-        selected_job_display = st.selectbox("Select Job", job_options["display"].tolist(), key=f"job_req_selected_job_{ACTIVE_REGION}")
-        selected_job = job_options.loc[job_options["display"] == selected_job_display].iloc[0]
+        job_req_select_key = f"job_req_selected_job_id_{ACTIVE_REGION}"
+        job_option_ids = job_options["id"].tolist()
+        if not job_option_ids:
+            st.warning("Create a job first.")
+            st.stop()
+        if job_req_select_key not in st.session_state or st.session_state[job_req_select_key] not in job_option_ids:
+            st.session_state[job_req_select_key] = int(job_option_ids[0])
+
+        selected_job_id = st.selectbox(
+            "Select Job",
+            job_option_ids,
+            format_func=lambda job_id: job_options.loc[job_options["id"] == job_id, "display"].iloc[0],
+            key=job_req_select_key,
+        )
+        selected_job = job_options.loc[job_options["id"] == selected_job_id].iloc[0]
 
         st.caption(
             f"Selected job: {selected_job['customer']} | {selected_job['job_name']} | {selected_job['job_code']}  •  "
