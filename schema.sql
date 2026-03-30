@@ -18,6 +18,7 @@ CREATE TABLE IF NOT EXISTS jobs (
     job_name TEXT NOT NULL,
     region_code TEXT NOT NULL REFERENCES regions(region_code),
     customer TEXT,
+    customer_color TEXT,
     location TEXT,
     job_start_date DATE NOT NULL,
     job_duration_days INTEGER NOT NULL,
@@ -70,4 +71,25 @@ CREATE TABLE IF NOT EXISTS requirement_fulfillment (
     quantity_assigned NUMERIC NOT NULL,
     notes TEXT,
     created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS job_rental_requirements (
+    id BIGSERIAL PRIMARY KEY,
+    job_id BIGINT NOT NULL REFERENCES jobs(id) ON DELETE CASCADE,
+    resource_class_id BIGINT NOT NULL REFERENCES resource_classes(id),
+    quantity_required NUMERIC NOT NULL,
+    days_before_job_start INTEGER NOT NULL DEFAULT 0,
+    days_after_job_end INTEGER NOT NULL DEFAULT 0,
+    vendor_name TEXT NOT NULL,
+    notes TEXT
+);
+
+CREATE TABLE IF NOT EXISTS job_manual_owned_allocations (
+    id BIGSERIAL PRIMARY KEY,
+    job_id BIGINT NOT NULL REFERENCES jobs(id) ON DELETE CASCADE,
+    resource_class_id BIGINT NOT NULL REFERENCES resource_classes(id),
+    quantity_assigned NUMERIC NOT NULL,
+    days_before_job_start INTEGER NOT NULL DEFAULT 0,
+    days_after_job_end INTEGER NOT NULL DEFAULT 0,
+    notes TEXT
 );
