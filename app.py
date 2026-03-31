@@ -513,7 +513,9 @@ def build_planning_board_data(active_region: str, selected_class: str | None, st
     for df in [req, rental_df, manual_df]:
         if not df.empty and "class_name" in df.columns:
             combined_classes.extend(df["class_name"].dropna().astype(str).tolist())
-    class_options = sorted(set(combined_classes))
+    class_order = resource_classes_df["class_name"].dropna().astype(str).tolist()
+    available_classes = list(dict.fromkeys(combined_classes))
+    class_options = [c for c in class_order if c in available_classes]
     if not class_options:
         return pd.DataFrame(), pd.DataFrame(), [], [], [], None, ""
 
@@ -647,8 +649,9 @@ def render_planning_board(active_region: str):
         st.info("No requirements yet.")
         return
 
-    class_options = req_all["class_name"].dropna().astype(str).unique().tolist()
-    class_options.sort()
+    available_classes = req_all["class_name"].dropna().astype(str).unique().tolist()
+    class_order = resource_classes_df["class_name"].dropna().astype(str).tolist()
+    class_options = [c for c in class_order if c in available_classes]
 
     planning_class_key = f"planning_class_{active_region}"
     if planning_class_key not in st.session_state or st.session_state[planning_class_key] not in class_options:
@@ -962,6 +965,7 @@ with tab_job_requirements:
         editor_df["Notes"] = ""
 
         st.markdown("##### Add Requirements for Selected Job")
+        st.caption("For hose classes, enter quantity in miles.")
         edited = st.data_editor(
             editor_df,
             num_rows="dynamic",
@@ -969,7 +973,7 @@ with tab_job_requirements:
             key=f"job_req_editor_{editor_key_suffix}",
             column_config={
                 "Class": st.column_config.SelectboxColumn("Class", options=rc_df["class_name"].tolist(), required=True, width="medium"),
-                "Quantity": st.column_config.TextColumn("Quantity", width="small"),
+                "Quantity": st.column_config.TextColumn("Quantity (Miles for Hose)", width="small", help="Hose quantities should be entered in miles, not feet."),
                 "Days Before": st.column_config.TextColumn("Days Before", width="small"),
                 "Days After": st.column_config.TextColumn("Days After", width="small"),
                 "Priority": st.column_config.SelectboxColumn("Priority", options=["Low", "Normal", "High", "Critical"], required=True, width="small"),
@@ -1026,6 +1030,7 @@ with tab_job_requirements:
         rental_editor_df["Notes"] = ""
 
         st.markdown("##### Add Rental Requirements for Selected Job")
+        st.caption("For hose classes, enter quantity in miles.")
         rental_edited = st.data_editor(
             rental_editor_df,
             num_rows="dynamic",
@@ -1033,7 +1038,7 @@ with tab_job_requirements:
             key=f"rental_req_editor_{rental_key_suffix}",
             column_config={
                 "Class": st.column_config.SelectboxColumn("Class", options=rc_df["class_name"].tolist(), required=True, width="medium"),
-                "Quantity": st.column_config.TextColumn("Quantity", width="small"),
+                "Quantity": st.column_config.TextColumn("Quantity (Miles for Hose)", width="small", help="Hose quantities should be entered in miles, not feet."),
                 "Days Before": st.column_config.TextColumn("Days Before", width="small"),
                 "Days After": st.column_config.TextColumn("Days After", width="small"),
                 "Vendor": st.column_config.TextColumn("Vendor", width="medium"),
