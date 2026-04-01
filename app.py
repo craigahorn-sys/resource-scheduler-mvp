@@ -683,11 +683,17 @@ def build_planning_board_data(active_region: str, selected_class: str | None, st
         availability = in_region - need
         segment_mid = seg_start + (seg_end - seg_start) / 2
 
-        summary_rows.extend([
-            {"Metric": "Need", "SegmentStart": seg_start, "SegmentEnd": seg_end, "X": segment_mid, "Value": need},
-            {"Metric": "In Region", "SegmentStart": seg_start, "SegmentEnd": seg_end, "X": segment_mid, "Value": in_region},
-            {"Metric": "Availability", "SegmentStart": seg_start, "SegmentEnd": seg_end, "X": segment_mid, "Value": availability},
-        ])
+        if include_excluded:
+            summary_rows.extend([
+                {"Metric": "Need", "SegmentStart": seg_start, "SegmentEnd": seg_end, "X": segment_mid, "Value": need},
+                {"Metric": "Unallocated Pool", "SegmentStart": seg_start, "SegmentEnd": seg_end, "X": segment_mid, "Value": availability},
+            ])
+        else:
+            summary_rows.extend([
+                {"Metric": "Need", "SegmentStart": seg_start, "SegmentEnd": seg_end, "X": segment_mid, "Value": need},
+                {"Metric": "In Region", "SegmentStart": seg_start, "SegmentEnd": seg_end, "X": segment_mid, "Value": in_region},
+                {"Metric": "Availability", "SegmentStart": seg_start, "SegmentEnd": seg_end, "X": segment_mid, "Value": availability},
+            ])
 
     summary_df = pd.DataFrame(summary_rows)
     return board_df, summary_df, gridlines, tickvals, ticktext, x_end, selected_class
@@ -733,7 +739,7 @@ def render_planning_board(active_region: str, include_excluded: bool = False, se
     if include_excluded:
         st.caption("Bid / Awarded jobs shown below are excluded from allocation and need calculations in the main board.")
 
-    summary_metrics = ["Need", "In Region", "Availability"]
+    summary_metrics = ["Need", "Unallocated Pool"] if include_excluded else ["Need", "In Region", "Availability"]
     total_job_rows = len(board_df)
     total_rows = total_job_rows + 1 + len(summary_metrics)
 
@@ -780,7 +786,10 @@ def render_planning_board(active_region: str, include_excluded: bool = False, se
             yanchor="middle",
         )
 
-    summary_y = {"Need": 3, "In Region": 2, "Availability": 1}
+    if include_excluded:
+        summary_y = {"Need": 2, "Unallocated Pool": 1}
+    else:
+        summary_y = {"Need": 3, "In Region": 2, "Availability": 1}
     for metric, y in summary_y.items():
         row_positions.append(y)
         row_labels.append(metric)
