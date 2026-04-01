@@ -728,15 +728,32 @@ def render_planning_board(active_region: str, include_excluded: bool = False, se
         st.info("No resource classes available for this view.")
         return
 
-    planning_key_suffix = "pipeline" if include_excluded else "active"
-    planning_class_key = f"planning_class_{planning_key_suffix}_{active_region}"
-    if planning_class_key not in st.session_state or st.session_state[planning_class_key] not in class_options:
-        st.session_state[planning_class_key] = class_options[0]
+    active_planning_class_key = f"planning_class_active_{active_region}"
+    active_planning_start_key = "planning_start_active"
+    active_planning_weeks_key = "planning_weeks_active"
 
-    c1, c2, c3 = st.columns([1.6, 1, 1])
-    selected_class = c1.selectbox("Resource View", class_options, key=planning_class_key)
-    board_start = c2.date_input("Board Start", value=date.today(), key=f"planning_start_{planning_key_suffix}")
-    num_weeks = c3.selectbox("Weeks", [1, 2, 4, 8, 10, 12, 16, 20, 24], index=5, key=f"planning_weeks_{planning_key_suffix}")
+    if include_excluded:
+        selected_class = st.session_state.get(active_planning_class_key)
+        if selected_class not in class_options:
+            selected_class = class_options[0]
+
+        board_start = st.session_state.get(active_planning_start_key, date.today())
+        num_weeks = st.session_state.get(active_planning_weeks_key, 12)
+
+        c1, c2, c3 = st.columns([1.6, 1, 1])
+        c1.markdown(f"**Resource View:** {selected_class}")
+        c2.markdown(f"**Board Start:** {pd.to_datetime(board_start).strftime('%m/%d/%Y')}")
+        c3.markdown(f"**Weeks:** {num_weeks}")
+    else:
+        planning_key_suffix = "active"
+        planning_class_key = active_planning_class_key
+        if planning_class_key not in st.session_state or st.session_state[planning_class_key] not in class_options:
+            st.session_state[planning_class_key] = class_options[0]
+
+        c1, c2, c3 = st.columns([1.6, 1, 1])
+        selected_class = c1.selectbox("Resource View", class_options, key=planning_class_key)
+        board_start = c2.date_input("Board Start", value=date.today(), key=active_planning_start_key)
+        num_weeks = c3.selectbox("Weeks", [1, 2, 4, 8, 10, 12, 16, 20, 24], index=5, key=active_planning_weeks_key)
 
     board_df, summary_df, gridlines, tickvals, ticktext, x_end, selected_class = build_planning_board_data(
         active_region=active_region,
