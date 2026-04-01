@@ -8,6 +8,7 @@ from .models import calc_job_dates
 
 
 PRIORITY_RANK = {"Critical": 1, "High": 2, "Normal": 3, "Low": 4}
+EXCLUDED_CALC_STATUSES = {"Bid", "Awarded"}
 
 
 def _scalar(engine, sql, params=None):
@@ -84,7 +85,7 @@ def _requirement_base_df(engine):
         SELECT
             jr.id, jr.job_id, jr.resource_class_id, jr.quantity_required, jr.days_before_job_start,
             jr.days_after_job_end, jr.priority, jr.notes,
-            j.job_code, j.job_name, j.region_code, j.job_start_date, j.job_duration_days,
+            j.job_code, j.job_name, j.region_code, j.status, j.job_start_date, j.job_duration_days,
             j.mob_days_before_job, j.demob_days_after_job,
             rc.class_name, rc.category, rc.unit_type
         FROM job_requirements jr
@@ -124,8 +125,13 @@ def _windows_overlap(start_a, end_a, start_b, end_b) -> bool:
 
 def recalc_all_requirements(engine):
     req = _requirement_base_df(engine)
+    manual_df = _manual_owned_allocations_base_df(engine)
     with engine.begin() as conn:
         conn.execute(text("DELETE FROM requirement_fulfillment WHERE fulfillment_type='internal_pool'"))
+        if req.empty:
+            return
+        req = req.loc[~req["status"].astype(str).isin(EXCLUDED_CALC_STATUSES)].copy()
+        manual_df = manual_df.loc[~manual_df["status"].astype(str).isin(EXCLUDED_CALC_STATUSES)].copy() if not manual_df.empty else manual_df
         if req.empty:
             return
         req = req.sort_values(by=["priority_rank", "required_start", "job_start_date", "id"], ascending=[True, True, True, True]).reset_index(drop=True)
@@ -139,8 +145,22 @@ def recalc_all_requirements(engine):
                 if _windows_overlap(row["required_start"], row["required_end"], alloc["required_start"], alloc["required_end"]):
                     overlapping_committed += float(alloc["quantity_assigned"])
             available = max(float(total_pool) - float(overlapping_committed), 0.0)
-            assign_qty = min(float(row["quantity_required"]), available)
+
+            manual_target = None
+            if not manual_df.empty:
+                manual_match = manual_df[
+                    (manual_df["job_id"] == row["job_id"]) &
+                    (manual_df["resource_class_id"] == row["resource_class_id"]) &
+                    (pd.to_datetime(manual_df["required_start"]) <= pd.to_datetime(row["required_end"])) &
+                    (pd.to_datetime(manual_df["required_end"]) >= pd.to_datetime(row["required_start"]))
+                ]
+                if not manual_match.empty:
+                    manual_target = float(manual_match["quantity_assigned"].astype(float).sum())
+
+            target_qty = float(row["quantity_required"]) if manual_target is None else min(float(row["quantity_required"]), float(manual_target))
+            assign_qty = min(target_qty, available)
             if assign_qty > 0:
+                note_prefix = "Manual EES override" if manual_target is not None else "Auto-allocated by priority"
                 conn.execute(text("""
                     INSERT INTO requirement_fulfillment(
                         requirement_id, fulfillment_type, source_name, specific_resource_name, quantity_assigned, notes
@@ -148,7 +168,7 @@ def recalc_all_requirements(engine):
                 """), {
                     "rid": int(row["id"]),
                     "q": float(assign_qty),
-                    "notes": f"Auto-allocated by priority. Pool={float(total_pool):.2f}, overlap_committed={float(overlapping_committed):.2f}, available={float(available):.2f}"
+                    "notes": f"{note_prefix}. Pool={float(total_pool):.2f}, overlap_committed={float(overlapping_committed):.2f}, available={float(available):.2f}, target={float(target_qty):.2f}"
                 })
                 allocations_by_bucket.setdefault(bucket, []).append({
                     "requirement_id": int(row["id"]),
@@ -225,7 +245,7 @@ def delete_requirement(engine, requirement_id: int):
 def requirement_summary_df(engine):
     df = query_df(engine, """
         SELECT
-            jr.id, jr.job_id, jr.resource_class_id, j.job_code, j.job_name, j.region_code,
+            jr.id, jr.job_id, jr.resource_class_id, j.job_code, j.job_name, j.region_code, j.status,
             COALESCE(j.customer, '') AS customer,
             COALESCE(j.customer_color, '') AS customer_color,
             rc.class_name, rc.unit_type,
@@ -236,7 +256,7 @@ def requirement_summary_df(engine):
         JOIN jobs j ON jr.job_id=j.id
         JOIN resource_classes rc ON jr.resource_class_id=rc.id
         LEFT JOIN requirement_fulfillment rf ON rf.requirement_id=jr.id
-        GROUP BY jr.id, jr.job_id, jr.resource_class_id, j.job_code, j.job_name, j.region_code, j.customer, j.customer_color,
+        GROUP BY jr.id, jr.job_id, jr.resource_class_id, j.job_code, j.job_name, j.region_code, j.status, j.customer, j.customer_color,
             rc.class_name, rc.unit_type,
             jr.quantity_required, jr.days_before_job_start, jr.days_after_job_end, jr.priority, jr.notes,
             j.job_start_date, j.job_duration_days, j.mob_days_before_job, j.demob_days_after_job
@@ -270,7 +290,7 @@ def get_fulfillment_df(engine):
     df = query_df(engine, """
         SELECT
             rf.*, jr.days_before_job_start, jr.days_after_job_end,
-            j.job_code, j.job_name, j.region_code, j.job_start_date, j.job_duration_days, j.mob_days_before_job, j.demob_days_after_job,
+            j.job_code, j.job_name, j.region_code, j.status, j.job_start_date, j.job_duration_days, j.mob_days_before_job, j.demob_days_after_job,
             rc.class_name, rc.unit_type
         FROM requirement_fulfillment rf
         JOIN job_requirements jr ON rf.requirement_id=jr.id
@@ -320,6 +340,8 @@ def pool_snapshot_df(engine, as_of_date):
     if df.empty:
         return df
     req = requirement_summary_df(engine)
+    if not req.empty and "status" in req.columns:
+        req = req.loc[~req["status"].astype(str).isin(EXCLUDED_CALC_STATUSES)].copy()
     committed, pool_status = [], []
     for _, r in df.iterrows():
         q = 0.0; related_shortfall = 0.0
@@ -350,6 +372,9 @@ def pool_snapshot_df(engine, as_of_date):
 
 def allocation_debug_df(engine):
     req = _requirement_base_df(engine)
+    if req.empty:
+        return req
+    req = req.loc[~req["status"].astype(str).isin(EXCLUDED_CALC_STATUSES)].copy()
     if req.empty:
         return req
     assigned_df = query_df(engine, """
@@ -407,6 +432,7 @@ def _rental_requirements_base_df(engine):
             j.job_code,
             j.job_name,
             j.region_code,
+            j.status,
             COALESCE(j.customer, '') AS customer,
             COALESCE(j.customer_color, '') AS customer_color,
             j.job_start_date,
@@ -446,6 +472,7 @@ def _manual_owned_allocations_base_df(engine):
             j.job_code,
             j.job_name,
             j.region_code,
+            j.status,
             COALESCE(j.customer, '') AS customer,
             COALESCE(j.customer_color, '') AS customer_color,
             j.job_start_date,

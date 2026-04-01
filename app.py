@@ -22,6 +22,8 @@ from services.scheduler import (
 st.set_page_config(page_title="Resource Scheduler V2", layout="wide")
 st.title("Resource Scheduler V2")
 
+EXCLUDED_CALC_STATUSES = {"Bid", "Awarded"}
+
 st.markdown(
     '''
     <style>
@@ -47,6 +49,27 @@ st.markdown(
     }
     .job-req-summary .qty {
         text-align: center !important;
+    }
+    .sticky-job-summary {
+        position: sticky;
+        top: 4.2rem;
+        z-index: 50;
+        background: white;
+        border: 1px solid #d9d9d9;
+        border-left: 5px solid #1f77b4;
+        border-radius: 10px;
+        padding: 10px 12px;
+        margin: 8px 0 12px 0;
+        box-shadow: 0 2px 8px rgba(0,0,0,0.06);
+    }
+    .sticky-job-summary .title {
+        font-size: 0.95rem;
+        font-weight: 700;
+        margin-bottom: 6px;
+    }
+    .sticky-job-summary .line {
+        font-size: 0.95rem;
+        line-height: 1.4;
     }
     </style>
     ''',
@@ -107,6 +130,19 @@ def filter_active_jobs_for_management(df: pd.DataFrame) -> pd.DataFrame:
     is_old_completed = (working["status"] == "Complete") & (end_dates < cutoff)
     return working.loc[~is_old_completed].copy()
 
+
+def filter_by_job_status(df: pd.DataFrame, include_excluded: bool = False) -> pd.DataFrame:
+    if df.empty or "status" not in df.columns:
+        return df
+    statuses = df["status"].astype(str)
+    if include_excluded:
+        return df.loc[statuses.isin(EXCLUDED_CALC_STATUSES)].copy()
+    return df.loc[~statuses.isin(EXCLUDED_CALC_STATUSES)].copy()
+
+def render_pipeline_notice(title: str = "Bid / Awarded Jobs"):
+    st.markdown(f"##### {title}")
+    st.caption("These jobs are shown for planning visibility only and are excluded from needs and allocation calculations.")
+
 regions_df, resource_classes_df, jobs_df = load_lookups()
 
 def region_format(code: str) -> str:
@@ -128,11 +164,19 @@ def quantity_step(unit_type: str, category: str) -> float:
 def quantity_format(unit_type: str, category: str) -> str:
     return "%.3f" if quantity_step(unit_type, category) == 0.125 else "%.0f"
 
+def display_class_name(row: pd.Series) -> str:
+    name = str(row.get("class_name", "") or "")
+    unit = str(row.get("unit_type", "") or "").lower()
+    category = str(row.get("category", "") or "")
+    if unit == "miles" or category == "Hose":
+        return f"{name} (miles)"
+    return name
+
 def resource_options_df(include_rental: bool = False) -> pd.DataFrame:
     rc = resource_classes_df.copy()
     if not include_rental and "category" in rc.columns:
         rc = rc.loc[rc["category"].astype(str) != "Rental"].copy()
-    rc["display"] = rc["class_name"]
+    rc["display"] = rc.apply(display_class_name, axis=1)
     return rc
 
 def render_jobs_manage_table(df: pd.DataFrame, active_region: str):
@@ -171,7 +215,7 @@ def render_jobs_manage_table(df: pd.DataFrame, active_region: str):
             edit_duration = st.number_input("Job Duration (days)", min_value=1, value=int(row["job_duration_days"]), step=1, key=f"job_duration_{row['id']}")
             edit_mob = st.number_input("Mobilization Days Before Job", min_value=0, value=int(row["mob_days_before_job"]), step=1, key=f"job_mob_{row['id']}")
             edit_demob = st.number_input("Demobilization Days After Job", min_value=0, value=int(row["demob_days_after_job"]), step=1, key=f"job_demob_{row['id']}")
-            statuses = ["Planned", "Tentative", "Active", "Billing Pending", "Complete", "Cancelled"]
+            statuses = ["Bid", "Awarded", "Planned", "Tentative", "Active", "Billing Pending", "Complete", "Cancelled"]
             status_index = statuses.index(row["status"]) if row["status"] in statuses else 0
             edit_status = st.selectbox("Status", statuses, index=status_index, key=f"job_status_{row['id']}")
             edit_notes = st.text_area("Notes", value=str(row.get("notes", "") or ""), key=f"job_notes_{row['id']}")
@@ -504,16 +548,18 @@ def compute_planning_segments(req: pd.DataFrame, rental_df: pd.DataFrame, manual
     return gridlines, segments, tickvals, ticktext, x_end
 
 
-def build_planning_board_data(active_region: str, selected_class: str | None, start_date, num_weeks: int):
-    req = region_filter(requirement_summary_df(engine), active_region)
-    rental_df = region_filter(get_rental_requirements_df(engine), active_region)
-    manual_df = region_filter(get_manual_owned_allocations_df(engine), active_region)
+def build_planning_board_data(active_region: str, selected_class: str | None, start_date, num_weeks: int, include_excluded: bool = False):
+    req = filter_by_job_status(region_filter(requirement_summary_df(engine), active_region), include_excluded=include_excluded)
+    rental_df = filter_by_job_status(region_filter(get_rental_requirements_df(engine), active_region), include_excluded=include_excluded)
+    manual_df = filter_by_job_status(region_filter(get_manual_owned_allocations_df(engine), active_region), include_excluded=include_excluded)
 
     combined_classes = []
     for df in [req, rental_df, manual_df]:
         if not df.empty and "class_name" in df.columns:
             combined_classes.extend(df["class_name"].dropna().astype(str).tolist())
-    class_options = sorted(set(combined_classes))
+    class_order = resource_classes_df["class_name"].dropna().astype(str).tolist()
+    available_classes = list(dict.fromkeys(combined_classes))
+    class_options = [c for c in class_order if c in available_classes]
     if not class_options:
         return pd.DataFrame(), pd.DataFrame(), [], [], [], None, ""
 
@@ -586,14 +632,12 @@ def build_planning_board_data(active_region: str, selected_class: str | None, st
         job_rent = rental_df[(rental_df["job_code"] == rec["job_code"])] if not rental_df.empty else pd.DataFrame()
         job_manual = manual_df[(manual_df["job_code"] == rec["job_code"])] if not manual_df.empty else pd.DataFrame()
 
-        required_qty = float(job_req["quantity_required"].astype(float).sum()) if not job_req.empty else 0.0
         ees_qty = float(job_manual["quantity_assigned"].astype(float).sum()) if not job_manual.empty else float(job_req["quantity_assigned"].astype(float).sum()) if not job_req.empty else 0.0
         rental_qty = float(job_rent["quantity_required"].astype(float).sum()) if not job_rent.empty else 0.0
         vendors = ", ".join(sorted(set(v for v in job_rent.get("vendor_name", pd.Series(dtype=str)).fillna("").tolist() if str(v).strip())))
 
-        parts = [str(rec["job_name"])]
-        if required_qty > 0:
-            parts.append(f"{format_compact_number(required_qty)} {rec['unit_type']}")
+        total_required = float(job_req["quantity_required"].astype(float).sum()) if not job_req.empty else 0.0
+        unit_label = str(rec["unit_type"]).title() if str(rec["unit_type"]).lower() == "miles" else str(rec["unit_type"])
 
         breakdown_parts = []
         if ees_qty > 0:
@@ -603,8 +647,10 @@ def build_planning_board_data(active_region: str, selected_class: str | None, st
             if vendors:
                 rental_text += f", {vendors}"
             breakdown_parts.append(rental_text)
+
+        label = f"{rec['job_name']}, {format_compact_number(total_required)} {unit_label}"
         if breakdown_parts:
-            parts.append(f"({ ' / '.join(breakdown_parts) })")
+            label += f", ({' / '.join(breakdown_parts)})"
 
         rows.append(
             {
@@ -612,7 +658,7 @@ def build_planning_board_data(active_region: str, selected_class: str | None, st
                 "customer_color": rec["customer_color"],
                 "job_code": rec["job_code"],
                 "job_name": rec["job_name"],
-                "label": ", ".join(parts),
+                "label": label,
                 "required_start": rec["required_start"],
                 "required_end": rec["required_end"],
                 "unit_type": rec["unit_type"],
@@ -621,6 +667,13 @@ def build_planning_board_data(active_region: str, selected_class: str | None, st
     board_df = pd.DataFrame(rows)
 
     summary_rows = []
+    active_req_all = filter_by_job_status(region_filter(requirement_summary_df(engine), active_region), include_excluded=False)
+    active_rental_all = filter_by_job_status(region_filter(get_rental_requirements_df(engine), active_region), include_excluded=False)
+    if not active_req_all.empty:
+        active_req_all = active_req_all.loc[active_req_all["class_name"] == selected_class].copy()
+    if not active_rental_all.empty:
+        active_rental_all = active_rental_all.loc[active_rental_all["class_name"] == selected_class].copy()
+
     for seg_start, seg_end in segments:
         seg_last_day = (seg_end - pd.Timedelta(days=1)).normalize()
         need = _overlap_qty(req, seg_start, seg_last_day, "quantity_required")
@@ -637,47 +690,87 @@ def build_planning_board_data(active_region: str, selected_class: str | None, st
         availability = in_region - need
         segment_mid = seg_start + (seg_end - seg_start) / 2
 
-        summary_rows.extend([
-            {"Metric": "Need", "SegmentStart": seg_start, "SegmentEnd": seg_end, "X": segment_mid, "Value": need},
-            {"Metric": "In Region", "SegmentStart": seg_start, "SegmentEnd": seg_end, "X": segment_mid, "Value": in_region},
-            {"Metric": "Availability", "SegmentStart": seg_start, "SegmentEnd": seg_end, "X": segment_mid, "Value": availability},
-        ])
+        if include_excluded:
+            active_need = _overlap_qty(active_req_all, seg_start, seg_last_day, "quantity_required")
+            active_rental = _overlap_qty(active_rental_all, seg_start, seg_last_day, "quantity_required")
+            active_in_region = total_pool + active_rental
+            unallocated_pool = active_in_region - active_need
+            projected_availability = unallocated_pool - need
+
+            summary_rows.extend([
+                {"Metric": "Need", "SegmentStart": seg_start, "SegmentEnd": seg_end, "X": segment_mid, "Value": need},
+                {"Metric": "Unallocated Pool", "SegmentStart": seg_start, "SegmentEnd": seg_end, "X": segment_mid, "Value": unallocated_pool},
+                {"Metric": "Availability", "SegmentStart": seg_start, "SegmentEnd": seg_end, "X": segment_mid, "Value": projected_availability},
+            ])
+        else:
+            summary_rows.extend([
+                {"Metric": "Need", "SegmentStart": seg_start, "SegmentEnd": seg_end, "X": segment_mid, "Value": need},
+                {"Metric": "In Region", "SegmentStart": seg_start, "SegmentEnd": seg_end, "X": segment_mid, "Value": in_region},
+                {"Metric": "Availability", "SegmentStart": seg_start, "SegmentEnd": seg_end, "X": segment_mid, "Value": availability},
+            ])
 
     summary_df = pd.DataFrame(summary_rows)
     return board_df, summary_df, gridlines, tickvals, ticktext, x_end, selected_class
 
 
-def render_planning_board(active_region: str):
-    st.subheader("Planning Board")
-    req_all = region_filter(requirement_summary_df(engine), active_region)
+
+def render_planning_board(active_region: str, include_excluded: bool = False, section_title: str = "Planning Board"):
+    st.subheader(section_title)
+    req_all = filter_by_job_status(region_filter(requirement_summary_df(engine), active_region), include_excluded=include_excluded)
     if req_all.empty:
-        st.info("No requirements yet.")
+        st.info("No requirements yet." if not include_excluded else "No Bid / Awarded requirements yet.")
         return
 
-    class_options = req_all["class_name"].dropna().astype(str).unique().tolist()
-    class_options.sort()
+    available_classes = req_all["class_name"].dropna().astype(str).unique().tolist()
+    class_order = resource_classes_df["class_name"].dropna().astype(str).tolist()
+    class_options = [c for c in class_order if c in available_classes]
+    if not class_options:
+        st.info("No resource classes available for this view.")
+        return
 
-    planning_class_key = f"planning_class_{active_region}"
-    if planning_class_key not in st.session_state or st.session_state[planning_class_key] not in class_options:
-        st.session_state[planning_class_key] = class_options[0]
+    active_planning_class_key = f"planning_class_active_{active_region}"
+    active_planning_start_key = "planning_start_active"
+    active_planning_weeks_key = "planning_weeks_active"
 
-    c1, c2, c3 = st.columns([1.6, 1, 1])
-    selected_class = c1.selectbox("Resource View", class_options, key=planning_class_key)
-    board_start = c2.date_input("Board Start", value=date.today(), key="planning_start")
-    num_weeks = c3.selectbox("Weeks", [8, 10, 12, 16], index=2, key="planning_weeks")
+    if include_excluded:
+        selected_class = st.session_state.get(active_planning_class_key)
+        if selected_class not in class_options:
+            selected_class = class_options[0]
+
+        board_start = st.session_state.get(active_planning_start_key, date.today())
+        num_weeks = st.session_state.get(active_planning_weeks_key, 12)
+
+        c1, c2, c3 = st.columns([1.6, 1, 1])
+        c1.markdown(f"**Resource View:** {selected_class}")
+        c2.markdown(f"**Board Start:** {pd.to_datetime(board_start).strftime('%m/%d/%Y')}")
+        c3.markdown(f"**Weeks:** {num_weeks}")
+    else:
+        planning_key_suffix = "active"
+        planning_class_key = active_planning_class_key
+        if planning_class_key not in st.session_state or st.session_state[planning_class_key] not in class_options:
+            st.session_state[planning_class_key] = class_options[0]
+
+        c1, c2, c3 = st.columns([1.6, 1, 1])
+        selected_class = c1.selectbox("Resource View", class_options, key=planning_class_key)
+        board_start = c2.date_input("Board Start", value=date.today(), key=active_planning_start_key)
+        num_weeks = c3.selectbox("Weeks", [1, 2, 4, 8, 10, 12, 16, 20, 24], index=5, key=active_planning_weeks_key)
 
     board_df, summary_df, gridlines, tickvals, ticktext, x_end, selected_class = build_planning_board_data(
         active_region=active_region,
         selected_class=selected_class,
         start_date=board_start,
         num_weeks=num_weeks,
+        include_excluded=include_excluded,
     )
 
     if board_df.empty:
         st.info("No rows for that resource view.")
         return
 
-    summary_metrics = ["Need", "In Region", "Availability"]
+    if include_excluded:
+        st.caption("Bid / Awarded jobs shown below are excluded from allocation and need calculations in the main board.")
+
+    summary_metrics = ["Need", "Unallocated Pool", "Availability"] if include_excluded else ["Need", "In Region", "Availability"]
     total_job_rows = len(board_df)
     total_rows = total_job_rows + 1 + len(summary_metrics)
 
@@ -724,7 +817,10 @@ def render_planning_board(active_region: str):
             yanchor="middle",
         )
 
-    summary_y = {"Need": 3, "In Region": 2, "Availability": 1}
+    if include_excluded:
+        summary_y = {"Need": 3, "Unallocated Pool": 2, "Availability": 1}
+    else:
+        summary_y = {"Need": 3, "In Region": 2, "Availability": 1}
     for metric, y in summary_y.items():
         row_positions.append(y)
         row_labels.append(metric)
@@ -801,7 +897,7 @@ def render_planning_board(active_region: str):
             "modeBarButtons": [["toImage"]],
             "toImageButtonOptions": {
                 "format": "png",
-                "filename": "planning_board",
+                "filename": "planning_board_pipeline" if include_excluded else "planning_board",
                 "height": 1200,
                 "width": 2200,
                 "scale": 2,
@@ -880,7 +976,7 @@ with tab_jobs:
     with c3:
         mob_days_before_job = st.number_input("Mobilization Days Before Job", min_value=0, value=3, step=1, key=f"create_job_mob_{region_key_suffix}")
         demob_days_after_job = st.number_input("Demobilization Days After Job", min_value=0, value=2, step=1, key=f"create_job_demob_{region_key_suffix}")
-        status = st.selectbox("Status", ["Planned", "Tentative", "Active", "Billing Pending", "Complete", "Cancelled"], key=f"create_job_status_{region_key_suffix}")
+        status = st.selectbox("Status", ["Bid", "Awarded", "Planned", "Tentative", "Active", "Billing Pending", "Complete", "Cancelled"], key=f"create_job_status_{region_key_suffix}")
     notes = st.text_area("Notes", key=f"create_job_notes_{region_key_suffix}")
 
     dates_preview = calc_job_dates(
@@ -934,13 +1030,35 @@ with tab_job_requirements:
             display=jobs_for_display["customer"] + " | " + jobs_for_display["job_name"] + " | " + jobs_for_display["job_code"]
         ).sort_values(["customer", "job_name", "job_code"])
 
-        selected_job_display = st.selectbox("Select Job", job_options["display"].tolist(), key=f"job_req_selected_job_{ACTIVE_REGION}")
-        selected_job = job_options.loc[job_options["display"] == selected_job_display].iloc[0]
+        job_req_select_key = f"job_req_selected_job_id_{ACTIVE_REGION}"
+        job_option_ids = job_options["id"].tolist()
+        if not job_option_ids:
+            st.warning("Create a job first.")
+            st.stop()
+        if job_req_select_key not in st.session_state or st.session_state[job_req_select_key] not in job_option_ids:
+            st.session_state[job_req_select_key] = int(job_option_ids[0])
 
-        st.caption(
-            f"Selected job: {selected_job['customer']} | {selected_job['job_name']} | {selected_job['job_code']}  •  "
-            f"Region: {region_format(str(selected_job['region_code']))}"
+        selected_job_id = st.selectbox(
+            "Select Job",
+            job_option_ids,
+            format_func=lambda job_id: job_options.loc[job_options["id"] == job_id, "display"].iloc[0],
+            key=job_req_select_key,
         )
+        selected_job = job_options.loc[job_options["id"] == selected_job_id].iloc[0]
+
+        st.markdown(
+            f'''
+            <div class="sticky-job-summary">
+                <div class="title">Selected Job Summary</div>
+                <div class="line"><strong>{selected_job['customer']}</strong> | <strong>{selected_job['job_name']}</strong> | <strong>{selected_job['job_code']}</strong> &nbsp;&nbsp;•&nbsp;&nbsp; Region: <strong>{region_format(str(selected_job['region_code']))}</strong></div>
+                <div class="line">Mob Days Before: <strong>{int(selected_job['mob_days_before_job'])}</strong> &nbsp;&nbsp;|&nbsp;&nbsp; Demob Days After: <strong>{int(selected_job['demob_days_after_job'])}</strong> &nbsp;&nbsp;|&nbsp;&nbsp; Job Start: <strong>{format_date_value(selected_job['job_start_date'])}</strong> &nbsp;&nbsp;|&nbsp;&nbsp; Job End: <strong>{format_date_value(selected_job['job_end_date'])}</strong></div>
+            </div>
+            
+            ''',
+            unsafe_allow_html=True,
+        )
+        if str(selected_job.get("status", "")) in EXCLUDED_CALC_STATUSES:
+            st.info("This Bid / Awarded job is excluded from needs and allocation calculations. It will appear only in the Bid / Awarded sections and pipeline planning board.")
 
         rc_df = resource_options_df(include_rental=False).copy()
 
@@ -948,7 +1066,7 @@ with tab_job_requirements:
             st.session_state["job_req_editor_reset_counter"] = 0
         editor_key_suffix = f"{ACTIVE_REGION}_{int(selected_job['id'])}_{st.session_state['job_req_editor_reset_counter']}"
 
-        editor_df = rc_df[["class_name"]].rename(columns={"class_name": "Class"})
+        editor_df = rc_df[["display"]].rename(columns={"display": "Class"})
         editor_df["Quantity"] = "0"
         editor_df["Days Before"] = "0"
         editor_df["Days After"] = "0"
@@ -962,7 +1080,7 @@ with tab_job_requirements:
             hide_index=True,
             key=f"job_req_editor_{editor_key_suffix}",
             column_config={
-                "Class": st.column_config.SelectboxColumn("Class", options=rc_df["class_name"].tolist(), required=True, width="medium"),
+                "Class": st.column_config.SelectboxColumn("Class", options=rc_df["display"].tolist(), required=True, width="medium"),
                 "Quantity": st.column_config.TextColumn("Quantity", width="small"),
                 "Days Before": st.column_config.TextColumn("Days Before", width="small"),
                 "Days After": st.column_config.TextColumn("Days After", width="small"),
@@ -989,7 +1107,7 @@ with tab_job_requirements:
                     days_after = 0
                 if qty <= 0:
                     continue
-                rc_match = rc_df.loc[rc_df["class_name"] == r["Class"]]
+                rc_match = rc_df.loc[rc_df["display"] == r["Class"]]
                 if rc_match.empty:
                     continue
                 create_requirement(engine, {
@@ -1012,7 +1130,7 @@ with tab_job_requirements:
         if "rental_req_editor_reset_counter" not in st.session_state:
             st.session_state["rental_req_editor_reset_counter"] = 0
         rental_key_suffix = f"{ACTIVE_REGION}_{int(selected_job['id'])}_{st.session_state['rental_req_editor_reset_counter']}"
-        rental_editor_df = rc_df[["class_name"]].rename(columns={"class_name": "Class"})
+        rental_editor_df = rc_df[["display"]].rename(columns={"display": "Class"})
         rental_editor_df["Quantity"] = "0"
         rental_editor_df["Days Before"] = "0"
         rental_editor_df["Days After"] = "0"
@@ -1026,7 +1144,7 @@ with tab_job_requirements:
             hide_index=True,
             key=f"rental_req_editor_{rental_key_suffix}",
             column_config={
-                "Class": st.column_config.SelectboxColumn("Class", options=rc_df["class_name"].tolist(), required=True, width="medium"),
+                "Class": st.column_config.SelectboxColumn("Class", options=rc_df["display"].tolist(), required=True, width="medium"),
                 "Quantity": st.column_config.TextColumn("Quantity", width="small"),
                 "Days Before": st.column_config.TextColumn("Days Before", width="small"),
                 "Days After": st.column_config.TextColumn("Days After", width="small"),
@@ -1054,7 +1172,7 @@ with tab_job_requirements:
                 vendor = str(r["Vendor"]).strip()
                 if qty <= 0 or not vendor:
                     continue
-                rc_match = rc_df.loc[rc_df["class_name"] == r["Class"]]
+                rc_match = rc_df.loc[rc_df["display"] == r["Class"]]
                 if rc_match.empty:
                     continue
                 create_rental_requirement(engine, {
@@ -1241,7 +1359,10 @@ with tab_requirements:
         render_requirements_manage_table(manage_df)
 
 with tab_planning:
-    render_planning_board(ACTIVE_REGION)
+    render_planning_board(ACTIVE_REGION, include_excluded=False, section_title="Planning Board")
+    st.divider()
+    render_pipeline_notice("Bid / Awarded Planning Board")
+    render_planning_board(ACTIVE_REGION, include_excluded=True, section_title="Bid / Awarded Planning Board")
 
 
 
@@ -1344,17 +1465,19 @@ with tab_allocations:
     st.subheader("Allocations")
     req_summary = region_filter(requirement_summary_df(engine), ACTIVE_REGION)
     ful = region_filter(get_fulfillment_df(engine), ACTIVE_REGION)
-    if req_summary.empty:
-        st.info("No requirements yet.")
+    active_req_summary = filter_by_job_status(req_summary, include_excluded=False)
+    active_ful = filter_by_job_status(ful, include_excluded=False)
+    if active_req_summary.empty:
+        st.info("No active requirements yet.")
     else:
-        display_req = format_dates_for_display(req_summary[["job_code","job_name","region_code","class_name","quantity_required","quantity_assigned","quantity_shortfall","allocation_status"]])
+        display_req = format_dates_for_display(active_req_summary[["job_code","job_name","region_code","class_name","quantity_required","quantity_assigned","quantity_shortfall","allocation_status"]])
         display_req["region_code"] = display_req["region_code"].map(lambda x: region_format(str(x)))
         st.dataframe(display_req, width="stretch")
     st.subheader("Fulfillment Rows")
-    if ful.empty:
-        st.info("No fulfillment rows yet.")
+    if active_ful.empty:
+        st.info("No active fulfillment rows yet.")
     else:
-        display_ful = format_dates_for_display(ful[["job_code","job_name","region_code","class_name","fulfillment_type","source_name","specific_resource_name","quantity_assigned","required_start","required_end"]])
+        display_ful = format_dates_for_display(active_ful[["job_code","job_name","region_code","class_name","fulfillment_type","source_name","specific_resource_name","quantity_assigned","required_start","required_end"]])
         display_ful["region_code"] = display_ful["region_code"].map(lambda x: region_format(str(x)))
         st.dataframe(display_ful, width="stretch")
     st.subheader("Allocation Debug")
@@ -1365,5 +1488,24 @@ with tab_allocations:
         display_dbg = format_dates_for_display(dbg.copy())
         display_dbg["region_code"] = display_dbg["region_code"].map(lambda x: region_format(str(x)))
         st.dataframe(display_dbg, width="stretch")
+
+    st.divider()
+    render_pipeline_notice("Bid / Awarded Jobs")
+    pipeline_req_summary = filter_by_job_status(req_summary, include_excluded=True)
+    pipeline_ful = filter_by_job_status(ful, include_excluded=True)
+    if pipeline_req_summary.empty:
+        st.info("No Bid / Awarded requirements yet.")
+    else:
+        st.markdown("##### Bid / Awarded Requirement Rows")
+        display_pipeline_req = format_dates_for_display(pipeline_req_summary[["job_code","job_name","status","region_code","class_name","quantity_required","quantity_assigned","quantity_shortfall","allocation_status"]])
+        display_pipeline_req["region_code"] = display_pipeline_req["region_code"].map(lambda x: region_format(str(x)))
+        st.dataframe(display_pipeline_req, width="stretch")
+    st.markdown("##### Bid / Awarded Fulfillment Rows")
+    if pipeline_ful.empty:
+        st.info("No fulfillment rows should appear here once recalculation is run, because Bid / Awarded jobs are excluded from allocation calculations.")
+    else:
+        display_pipeline_ful = format_dates_for_display(pipeline_ful[["job_code","job_name","status","region_code","class_name","fulfillment_type","source_name","specific_resource_name","quantity_assigned","required_start","required_end"]])
+        display_pipeline_ful["region_code"] = display_pipeline_ful["region_code"].map(lambda x: region_format(str(x)))
+        st.dataframe(display_pipeline_ful, width="stretch")
 
 
