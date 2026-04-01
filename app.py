@@ -246,8 +246,8 @@ def render_requirements_manage_table(df: pd.DataFrame, key_prefix: str = 'req'):
         st.info("No requirements yet.")
         return
 
-    widths = [1.2, 1.4, 1.0, 1.3, 0.9, 0.95, 0.95, 1.1, 0.8]
-    headers = ["Customer", "Job Name", "Job Code", "Class", "Quantity", "Assigned EES", "Assigned Rental", "Status", "Manage"]
+    widths = [1.15, 1.35, 0.95, 1.2, 0.85, 0.9, 0.9, 1.0, 1.2, 0.8]
+    headers = ["Customer", "Job Name", "Job Code", "Class", "Quantity", "Assigned EES", "Assigned Rental", "Status", "Notes", "Manage"]
 
     hdr = st.columns(widths)
     for c, h in zip(hdr, headers):
@@ -266,8 +266,9 @@ def render_requirements_manage_table(df: pd.DataFrame, key_prefix: str = 'req'):
         cols[5].write(format_compact_number(row.get("assigned_ees", 0)))
         cols[6].write(format_compact_number(row.get("assigned_rental", 0)))
         cols[7].write(str(row.get("allocation_status", "")))
+        cols[8].write(str(row.get("notes", "") or ""))
 
-        with cols[8].popover("Edit/Delete", use_container_width=True):
+        with cols[9].popover("Edit/Delete", use_container_width=True):
             legacy_class = str(row["class_name"])
             class_options = rc_names.copy()
             if legacy_class not in class_options:
@@ -1197,10 +1198,11 @@ with tab_job_requirements:
         if selected_job_reqs.empty:
             st.info("No owned requirements yet for this job.")
         else:
-            display_req = selected_job_reqs[["class_name", "quantity_required", "required_start", "required_end"]].copy()
+            display_req = selected_job_reqs[["class_name", "quantity_required", "required_start", "required_end", "notes"]].copy()
             display_req["quantity_required"] = display_req["quantity_required"].map(format_compact_number)
+            display_req["notes"] = display_req["notes"].fillna("")
             display_req = format_dates_for_display(display_req)
-            display_req.columns = ["Class Name", "Quantity Required", "Required Start", "Required End"]
+            display_req.columns = ["Class Name", "Quantity Required", "Required Start", "Required End", "Notes"]
             render_simple_html_table(display_req, qty_columns=["Quantity Required"])
             rental_manage = region_filter(get_rental_requirements_df(engine), ACTIVE_REGION)
             rental_manage = rental_manage[["job_id", "resource_class_id", "quantity_required", "vendor_name"]].copy() if not rental_manage.empty else pd.DataFrame(columns=["job_id", "resource_class_id", "quantity_required", "vendor_name"])
