@@ -50,6 +50,27 @@ st.markdown(
     .job-req-summary .qty {
         text-align: center !important;
     }
+    .sticky-job-summary {
+        position: sticky;
+        top: 0.5rem;
+        z-index: 100;
+        background: white;
+        border: 1px solid #d9d9d9;
+        border-left: 5px solid #1f77b4;
+        border-radius: 10px;
+        padding: 12px 14px;
+        margin: 8px 0 14px 0;
+        box-shadow: 0 2px 8px rgba(0,0,0,0.06);
+    }
+    .sticky-job-summary .title {
+        font-size: 0.95rem;
+        font-weight: 700;
+        margin-bottom: 6px;
+    }
+    .sticky-job-summary .line {
+        font-size: 0.95rem;
+        line-height: 1.4;
+    }
     </style>
     ''',
     unsafe_allow_html=True,
@@ -985,9 +1006,15 @@ with tab_job_requirements:
         )
         selected_job = job_options.loc[job_options["id"] == selected_job_id].iloc[0]
 
-        st.caption(
-            f"Selected job: {selected_job['customer']} | {selected_job['job_name']} | {selected_job['job_code']}  •  "
-            f"Region: {region_format(str(selected_job['region_code']))}"
+        st.markdown(
+            f'''
+            <div class="sticky-job-summary">
+                <div class="title">Selected Job Summary</div>
+                <div class="line"><strong>{selected_job['customer']}</strong> | <strong>{selected_job['job_name']}</strong> | <strong>{selected_job['job_code']}</strong> &nbsp;&nbsp;•&nbsp;&nbsp; Region: <strong>{region_format(str(selected_job['region_code']))}</strong></div>
+                <div class="line">Mob Days Before: <strong>{int(selected_job['mob_days_before_job'])}</strong> &nbsp;&nbsp;|&nbsp;&nbsp; Demob Days After: <strong>{int(selected_job['demob_days_after_job'])}</strong> &nbsp;&nbsp;|&nbsp;&nbsp; Job Start: <strong>{format_date_value(selected_job['job_start_date'])}</strong> &nbsp;&nbsp;|&nbsp;&nbsp; Job End: <strong>{format_date_value(selected_job['job_end_date'])}</strong></div>
+            </div>
+            ''',
+            unsafe_allow_html=True,
         )
         if str(selected_job.get("status", "")) in EXCLUDED_CALC_STATUSES:
             st.info("This Bid / Awarded job is excluded from needs and allocation calculations. It will appear only in the Bid / Awarded sections and pipeline planning board.")
