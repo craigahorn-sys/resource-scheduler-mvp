@@ -51,32 +51,16 @@ st.markdown(
         text-align: center !important;
     }
     .sticky-job-summary {
-        position: fixed;
-        top: 5.25rem;
-        right: 1.25rem;
-        width: min(520px, 42vw);
-        z-index: 999;
-        background: rgba(255,255,255,0.98);
+        position: sticky;
+        top: 4.2rem;
+        z-index: 50;
+        background: white;
         border: 1px solid #d9d9d9;
         border-left: 5px solid #1f77b4;
         border-radius: 10px;
-        padding: 12px 14px;
-        margin: 0;
-        box-shadow: 0 6px 18px rgba(0,0,0,0.10);
-    }
-    .job-summary-spacer {
-        height: 110px;
-    }
-    @media (max-width: 1200px) {
-        .sticky-job-summary {
-            position: static;
-            width: auto;
-            margin: 8px 0 14px 0;
-            box-shadow: 0 2px 8px rgba(0,0,0,0.06);
-        }
-        .job-summary-spacer {
-            display: none;
-        }
+        padding: 10px 12px;
+        margin: 8px 0 12px 0;
+        box-shadow: 0 2px 8px rgba(0,0,0,0.06);
     }
     .sticky-job-summary .title {
         font-size: 0.95rem;
@@ -1029,7 +1013,7 @@ with tab_job_requirements:
                 <div class="line"><strong>{selected_job['customer']}</strong> | <strong>{selected_job['job_name']}</strong> | <strong>{selected_job['job_code']}</strong> &nbsp;&nbsp;•&nbsp;&nbsp; Region: <strong>{region_format(str(selected_job['region_code']))}</strong></div>
                 <div class="line">Mob Days Before: <strong>{int(selected_job['mob_days_before_job'])}</strong> &nbsp;&nbsp;|&nbsp;&nbsp; Demob Days After: <strong>{int(selected_job['demob_days_after_job'])}</strong> &nbsp;&nbsp;|&nbsp;&nbsp; Job Start: <strong>{format_date_value(selected_job['job_start_date'])}</strong> &nbsp;&nbsp;|&nbsp;&nbsp; Job End: <strong>{format_date_value(selected_job['job_end_date'])}</strong></div>
             </div>
-            <div class="job-summary-spacer"></div>
+            
             ''',
             unsafe_allow_html=True,
         )
