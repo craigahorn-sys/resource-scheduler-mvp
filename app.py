@@ -615,14 +615,21 @@ def build_planning_board_data(active_region: str, selected_class: str | None, st
         rental_qty = float(job_rent["quantity_required"].astype(float).sum()) if not job_rent.empty else 0.0
         vendors = ", ".join(sorted(set(v for v in job_rent.get("vendor_name", pd.Series(dtype=str)).fillna("").tolist() if str(v).strip())))
 
-        parts = [str(rec["job_name"])]
+        total_required = float(job_req["quantity_required"].astype(float).sum()) if not job_req.empty else 0.0
+        unit_label = str(rec["unit_type"]).title() if str(rec["unit_type"]).lower() == "miles" else str(rec["unit_type"])
+
+        breakdown_parts = []
         if ees_qty > 0:
-            parts.append(f"{format_compact_number(ees_qty)} {rec['unit_type']} EES")
+            breakdown_parts.append(f"{format_compact_number(ees_qty)} EES")
         if rental_qty > 0:
-            rental_text = f"{format_compact_number(rental_qty)} {rec['unit_type']} Rental"
+            rental_text = f"{format_compact_number(rental_qty)} Rental"
             if vendors:
                 rental_text += f", {vendors}"
-            parts.append(rental_text)
+            breakdown_parts.append(rental_text)
+
+        label = f"{rec['job_name']}, {format_compact_number(total_required)} {unit_label}"
+        if breakdown_parts:
+            label += f", ({' / '.join(breakdown_parts)})"
 
         rows.append(
             {
@@ -630,7 +637,7 @@ def build_planning_board_data(active_region: str, selected_class: str | None, st
                 "customer_color": rec["customer_color"],
                 "job_code": rec["job_code"],
                 "job_name": rec["job_name"],
-                "label": ", ".join(parts),
+                "label": label,
                 "required_start": rec["required_start"],
                 "required_end": rec["required_end"],
                 "unit_type": rec["unit_type"],
