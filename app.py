@@ -667,6 +667,13 @@ def build_planning_board_data(active_region: str, selected_class: str | None, st
     board_df = pd.DataFrame(rows)
 
     summary_rows = []
+    active_req_all = filter_by_job_status(region_filter(requirement_summary_df(engine), active_region), include_excluded=False)
+    active_rental_all = filter_by_job_status(region_filter(get_rental_requirements_df(engine), active_region), include_excluded=False)
+    if not active_req_all.empty:
+        active_req_all = active_req_all.loc[active_req_all["class_name"] == selected_class].copy()
+    if not active_rental_all.empty:
+        active_rental_all = active_rental_all.loc[active_rental_all["class_name"] == selected_class].copy()
+
     for seg_start, seg_end in segments:
         seg_last_day = (seg_end - pd.Timedelta(days=1)).normalize()
         need = _overlap_qty(req, seg_start, seg_last_day, "quantity_required")
@@ -684,9 +691,16 @@ def build_planning_board_data(active_region: str, selected_class: str | None, st
         segment_mid = seg_start + (seg_end - seg_start) / 2
 
         if include_excluded:
+            active_need = _overlap_qty(active_req_all, seg_start, seg_last_day, "quantity_required")
+            active_rental = _overlap_qty(active_rental_all, seg_start, seg_last_day, "quantity_required")
+            active_in_region = total_pool + active_rental
+            unallocated_pool = active_in_region - active_need
+            projected_availability = unallocated_pool - need
+
             summary_rows.extend([
                 {"Metric": "Need", "SegmentStart": seg_start, "SegmentEnd": seg_end, "X": segment_mid, "Value": need},
-                {"Metric": "Unallocated Pool", "SegmentStart": seg_start, "SegmentEnd": seg_end, "X": segment_mid, "Value": availability},
+                {"Metric": "Unallocated Pool", "SegmentStart": seg_start, "SegmentEnd": seg_end, "X": segment_mid, "Value": unallocated_pool},
+                {"Metric": "Availability", "SegmentStart": seg_start, "SegmentEnd": seg_end, "X": segment_mid, "Value": projected_availability},
             ])
         else:
             summary_rows.extend([
@@ -739,7 +753,7 @@ def render_planning_board(active_region: str, include_excluded: bool = False, se
     if include_excluded:
         st.caption("Bid / Awarded jobs shown below are excluded from allocation and need calculations in the main board.")
 
-    summary_metrics = ["Need", "Unallocated Pool"] if include_excluded else ["Need", "In Region", "Availability"]
+    summary_metrics = ["Need", "Unallocated Pool", "Availability"] if include_excluded else ["Need", "In Region", "Availability"]
     total_job_rows = len(board_df)
     total_rows = total_job_rows + 1 + len(summary_metrics)
 
@@ -787,7 +801,7 @@ def render_planning_board(active_region: str, include_excluded: bool = False, se
         )
 
     if include_excluded:
-        summary_y = {"Need": 2, "Unallocated Pool": 1}
+        summary_y = {"Need": 3, "Unallocated Pool": 2, "Availability": 1}
     else:
         summary_y = {"Need": 3, "In Region": 2, "Availability": 1}
     for metric, y in summary_y.items():
