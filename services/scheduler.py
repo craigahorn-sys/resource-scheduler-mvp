@@ -148,14 +148,24 @@ def recalc_all_requirements(engine):
 
             manual_target = None
             if not manual_df.empty:
-                manual_match = manual_df[
-                    (manual_df["job_id"] == row["job_id"]) &
-                    (manual_df["resource_class_id"] == row["resource_class_id"]) &
-                    (pd.to_datetime(manual_df["required_start"]) <= pd.to_datetime(row["required_end"])) &
-                    (pd.to_datetime(manual_df["required_end"]) >= pd.to_datetime(row["required_start"]))
-                ]
-                if not manual_match.empty:
-                    manual_target = float(manual_match["quantity_assigned"].astype(float).sum())
+                if "requirement_id" in manual_df.columns:
+                    specific_match = manual_df.loc[manual_df["requirement_id"] == row["id"]]
+                else:
+                    specific_match = pd.DataFrame()
+                if not specific_match.empty:
+                    manual_target = float(specific_match["quantity_assigned"].astype(float).sum())
+                else:
+                    legacy_manual = manual_df.copy()
+                    if "requirement_id" in legacy_manual.columns:
+                        legacy_manual = legacy_manual.loc[legacy_manual["requirement_id"].isna()].copy()
+                    manual_match = legacy_manual[
+                        (legacy_manual["job_id"] == row["job_id"]) &
+                        (legacy_manual["resource_class_id"] == row["resource_class_id"]) &
+                        (pd.to_datetime(legacy_manual["required_start"]) <= pd.to_datetime(row["required_end"])) &
+                        (pd.to_datetime(legacy_manual["required_end"]) >= pd.to_datetime(row["required_start"]))
+                    ]
+                    if not manual_match.empty:
+                        manual_target = float(manual_match["quantity_assigned"].astype(float).sum())
 
             target_qty = float(row["quantity_required"]) if manual_target is None else min(float(row["quantity_required"]), float(manual_target))
             assign_qty = min(target_qty, available)
@@ -238,8 +248,6 @@ def update_requirement(engine, requirement_id: int, data: dict):
 
 
 def delete_requirement(engine, requirement_id: int):
-    execute(engine, "DELETE FROM job_rental_requirements WHERE requirement_id=:requirement_id", {"requirement_id": int(requirement_id)})
-    execute(engine, "DELETE FROM job_manual_owned_allocations WHERE requirement_id=:requirement_id", {"requirement_id": int(requirement_id)})
     execute(engine, "DELETE FROM job_requirements WHERE id=:requirement_id", {"requirement_id": int(requirement_id)})
     recalc_all_requirements(engine)
 
@@ -247,7 +255,7 @@ def delete_requirement(engine, requirement_id: int):
 def requirement_summary_df(engine):
     df = query_df(engine, """
         SELECT
-            jr.id AS requirement_id, jr.id, jr.job_id, jr.resource_class_id, j.job_code, j.job_name, j.region_code, j.status,
+            jr.id, jr.job_id, jr.resource_class_id, j.job_code, j.job_name, j.region_code, j.status,
             COALESCE(j.customer, '') AS customer,
             COALESCE(j.customer_color, '') AS customer_color,
             rc.class_name, rc.unit_type,
@@ -466,6 +474,7 @@ def _manual_owned_allocations_base_df(engine):
         SELECT
             mo.id,
             mo.job_id,
+            mo.requirement_id,
             mo.resource_class_id,
             mo.quantity_assigned,
             mo.days_before_job_start,
@@ -502,16 +511,14 @@ def _manual_owned_allocations_base_df(engine):
 
 
 def create_rental_requirement(engine, data: dict):
-    payload = dict(data)
-    payload.setdefault("requirement_id", None)
     with engine.begin() as conn:
         res = conn.execute(text("""
             INSERT INTO job_rental_requirements(
-                job_id, requirement_id, resource_class_id, quantity_required, days_before_job_start, days_after_job_end, vendor_name, notes
+                job_id, resource_class_id, quantity_required, days_before_job_start, days_after_job_end, vendor_name, notes
             ) VALUES (
-                :job_id, :requirement_id, :resource_class_id, :quantity_required, :days_before_job_start, :days_after_job_end, :vendor_name, :notes
+                :job_id, :resource_class_id, :quantity_required, :days_before_job_start, :days_after_job_end, :vendor_name, :notes
             ) RETURNING id
-        """), payload)
+        """), data)
         rental_id = int(res.scalar_one())
     recalc_all_requirements(engine)
     return rental_id
@@ -526,38 +533,15 @@ def get_rental_requirements_df(engine):
     return _rental_requirements_base_df(engine)
 
 
-def upsert_rental_requirement_for_requirement(engine, requirement_id: int, job_id: int, resource_class_id: int, quantity_required: float, days_before_job_start: int, days_after_job_end: int, vendor_name: str, notes: str = ""):
-    with engine.begin() as conn:
-        conn.execute(text("DELETE FROM job_rental_requirements WHERE requirement_id=:requirement_id"), {"requirement_id": int(requirement_id)})
-        if float(quantity_required) > 0:
-            conn.execute(text("""
-                INSERT INTO job_rental_requirements(
-                    job_id, requirement_id, resource_class_id, quantity_required, days_before_job_start, days_after_job_end, vendor_name, notes
-                ) VALUES (
-                    :job_id, :requirement_id, :resource_class_id, :quantity_required, :days_before_job_start, :days_after_job_end, :vendor_name, :notes
-                )
-            """), {
-                "job_id": int(job_id),
-                "requirement_id": int(requirement_id),
-                "resource_class_id": int(resource_class_id),
-                "quantity_required": float(quantity_required),
-                "days_before_job_start": int(days_before_job_start),
-                "days_after_job_end": int(days_after_job_end),
-                "vendor_name": str(vendor_name or "").strip(),
-                "notes": str(notes or ""),
-            })
-    recalc_all_requirements(engine)
-
-
 def upsert_rental_requirement_for_job_class(engine, job_id: int, resource_class_id: int, quantity_required: float, days_before_job_start: int, days_after_job_end: int, vendor_name: str, notes: str = ""):
     with engine.begin() as conn:
         conn.execute(text("DELETE FROM job_rental_requirements WHERE job_id=:job_id AND resource_class_id=:resource_class_id"), {"job_id": int(job_id), "resource_class_id": int(resource_class_id)})
         if float(quantity_required) > 0:
             conn.execute(text("""
                 INSERT INTO job_rental_requirements(
-                    job_id, requirement_id, resource_class_id, quantity_required, days_before_job_start, days_after_job_end, vendor_name, notes
+                    job_id, resource_class_id, quantity_required, days_before_job_start, days_after_job_end, vendor_name, notes
                 ) VALUES (
-                    :job_id, NULL, :resource_class_id, :quantity_required, :days_before_job_start, :days_after_job_end, :vendor_name, :notes
+                    :job_id, :resource_class_id, :quantity_required, :days_before_job_start, :days_after_job_end, :vendor_name, :notes
                 )
             """), {
                 "job_id": int(job_id),
@@ -590,9 +574,12 @@ def delete_manual_owned_allocation(engine, manual_allocation_id: int):
     recalc_all_requirements(engine)
 
 
-def upsert_manual_owned_allocation_for_requirement(engine, requirement_id: int, job_id: int, resource_class_id: int, quantity_assigned: float, days_before_job_start: int, days_after_job_end: int, notes: str = ""):
+def upsert_manual_owned_allocation_for_job_class(engine, job_id: int, resource_class_id: int, quantity_assigned: float, days_before_job_start: int, days_after_job_end: int, notes: str = "", requirement_id: int | None = None):
     with engine.begin() as conn:
-        conn.execute(text("DELETE FROM job_manual_owned_allocations WHERE requirement_id=:requirement_id"), {"requirement_id": int(requirement_id)})
+        if requirement_id is not None:
+            conn.execute(text("DELETE FROM job_manual_owned_allocations WHERE requirement_id=:requirement_id"), {"requirement_id": int(requirement_id)})
+        else:
+            conn.execute(text("DELETE FROM job_manual_owned_allocations WHERE job_id=:job_id AND resource_class_id=:resource_class_id AND requirement_id IS NULL"), {"job_id": int(job_id), "resource_class_id": int(resource_class_id)})
         if float(quantity_assigned) > 0:
             conn.execute(text("""
                 INSERT INTO job_manual_owned_allocations(
@@ -602,28 +589,7 @@ def upsert_manual_owned_allocation_for_requirement(engine, requirement_id: int, 
                 )
             """), {
                 "job_id": int(job_id),
-                "requirement_id": int(requirement_id),
-                "resource_class_id": int(resource_class_id),
-                "quantity_assigned": float(quantity_assigned),
-                "days_before_job_start": int(days_before_job_start),
-                "days_after_job_end": int(days_after_job_end),
-                "notes": str(notes or ""),
-            })
-    recalc_all_requirements(engine)
-
-
-def upsert_manual_owned_allocation_for_job_class(engine, job_id: int, resource_class_id: int, quantity_assigned: float, days_before_job_start: int, days_after_job_end: int, notes: str = ""):
-    with engine.begin() as conn:
-        conn.execute(text("DELETE FROM job_manual_owned_allocations WHERE job_id=:job_id AND resource_class_id=:resource_class_id"), {"job_id": int(job_id), "resource_class_id": int(resource_class_id)})
-        if float(quantity_assigned) > 0:
-            conn.execute(text("""
-                INSERT INTO job_manual_owned_allocations(
-                    job_id, requirement_id, resource_class_id, quantity_assigned, days_before_job_start, days_after_job_end, notes
-                ) VALUES (
-                    :job_id, NULL, :resource_class_id, :quantity_assigned, :days_before_job_start, :days_after_job_end, :notes
-                )
-            """), {
-                "job_id": int(job_id),
+                "requirement_id": int(requirement_id) if requirement_id is not None else None,
                 "resource_class_id": int(resource_class_id),
                 "quantity_assigned": float(quantity_assigned),
                 "days_before_job_start": int(days_before_job_start),
