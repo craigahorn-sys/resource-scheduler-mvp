@@ -87,6 +87,7 @@ CREATE TABLE IF NOT EXISTS job_rental_requirements (
 CREATE TABLE IF NOT EXISTS job_manual_owned_allocations (
     id BIGSERIAL PRIMARY KEY,
     job_id BIGINT NOT NULL REFERENCES jobs(id) ON DELETE CASCADE,
+    requirement_id BIGINT REFERENCES job_requirements(id) ON DELETE CASCADE,
     resource_class_id BIGINT NOT NULL REFERENCES resource_classes(id),
     quantity_assigned NUMERIC NOT NULL,
     days_before_job_start INTEGER NOT NULL DEFAULT 0,
