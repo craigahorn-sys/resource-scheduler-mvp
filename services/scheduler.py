@@ -148,24 +148,27 @@ def recalc_all_requirements(engine):
 
             manual_target = None
             if not manual_df.empty:
+                row_specific_match = pd.DataFrame()
                 if "requirement_id" in manual_df.columns:
-                    specific_match = manual_df.loc[manual_df["requirement_id"] == row["id"]]
+                    row_specific_match = manual_df.loc[manual_df["requirement_id"] == row["id"]].copy()
+                if not row_specific_match.empty:
+                    manual_target = float(row_specific_match["quantity_assigned"].astype(float).sum())
                 else:
-                    specific_match = pd.DataFrame()
-                if not specific_match.empty:
-                    manual_target = float(specific_match["quantity_assigned"].astype(float).sum())
-                else:
-                    legacy_manual = manual_df.copy()
-                    if "requirement_id" in legacy_manual.columns:
-                        legacy_manual = legacy_manual.loc[legacy_manual["requirement_id"].isna()].copy()
-                    manual_match = legacy_manual[
-                        (legacy_manual["job_id"] == row["job_id"]) &
-                        (legacy_manual["resource_class_id"] == row["resource_class_id"]) &
-                        (pd.to_datetime(legacy_manual["required_start"]) <= pd.to_datetime(row["required_end"])) &
-                        (pd.to_datetime(legacy_manual["required_end"]) >= pd.to_datetime(row["required_start"]))
-                    ]
+                    manual_match = manual_df[
+                        (manual_df["job_id"] == row["job_id"]) &
+                        (manual_df["resource_class_id"] == row["resource_class_id"])
+                    ].copy()
+                    if "requirement_id" in manual_match.columns:
+                        manual_match = manual_match.loc[manual_match["requirement_id"].isna()].copy()
                     if not manual_match.empty:
-                        manual_target = float(manual_match["quantity_assigned"].astype(float).sum())
+                        same_bucket_count = int(req.loc[(req["job_id"] == row["job_id"]) & (req["resource_class_id"] == row["resource_class_id"])].shape[0])
+                        if same_bucket_count == 1:
+                            overlap_match = manual_match[
+                                (pd.to_datetime(manual_match["required_start"]) <= pd.to_datetime(row["required_end"])) &
+                                (pd.to_datetime(manual_match["required_end"]) >= pd.to_datetime(row["required_start"]))
+                            ]
+                            if not overlap_match.empty:
+                                manual_target = float(overlap_match["quantity_assigned"].astype(float).sum())
 
             target_qty = float(row["quantity_required"]) if manual_target is None else min(float(row["quantity_required"]), float(manual_target))
             assign_qty = min(target_qty, available)
@@ -556,16 +559,14 @@ def upsert_rental_requirement_for_job_class(engine, job_id: int, resource_class_
 
 
 def create_manual_owned_allocation(engine, data: dict):
-    payload = dict(data)
-    payload.setdefault("requirement_id", None)
     with engine.begin() as conn:
         res = conn.execute(text("""
             INSERT INTO job_manual_owned_allocations(
-                job_id, requirement_id, resource_class_id, quantity_assigned, days_before_job_start, days_after_job_end, notes
+                job_id, resource_class_id, quantity_assigned, days_before_job_start, days_after_job_end, notes
             ) VALUES (
-                :job_id, :requirement_id, :resource_class_id, :quantity_assigned, :days_before_job_start, :days_after_job_end, :notes
+                :job_id, :resource_class_id, :quantity_assigned, :days_before_job_start, :days_after_job_end, :notes
             ) RETURNING id
-        """), payload)
+        """), data)
         return int(res.scalar_one())
 
 
@@ -577,9 +578,15 @@ def delete_manual_owned_allocation(engine, manual_allocation_id: int):
 def upsert_manual_owned_allocation_for_job_class(engine, job_id: int, resource_class_id: int, quantity_assigned: float, days_before_job_start: int, days_after_job_end: int, notes: str = "", requirement_id: int | None = None):
     with engine.begin() as conn:
         if requirement_id is not None:
-            conn.execute(text("DELETE FROM job_manual_owned_allocations WHERE requirement_id=:requirement_id"), {"requirement_id": int(requirement_id)})
+            conn.execute(
+                text("DELETE FROM job_manual_owned_allocations WHERE requirement_id=:requirement_id"),
+                {"requirement_id": int(requirement_id)},
+            )
         else:
-            conn.execute(text("DELETE FROM job_manual_owned_allocations WHERE job_id=:job_id AND resource_class_id=:resource_class_id AND requirement_id IS NULL"), {"job_id": int(job_id), "resource_class_id": int(resource_class_id)})
+            conn.execute(
+                text("DELETE FROM job_manual_owned_allocations WHERE job_id=:job_id AND resource_class_id=:resource_class_id AND requirement_id IS NULL"),
+                {"job_id": int(job_id), "resource_class_id": int(resource_class_id)},
+            )
         if float(quantity_assigned) > 0:
             conn.execute(text("""
                 INSERT INTO job_manual_owned_allocations(
