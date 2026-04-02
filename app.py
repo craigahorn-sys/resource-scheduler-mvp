@@ -683,7 +683,44 @@ def build_planning_board_data(active_region: str, selected_class: str | None, st
 
         rental_qty = float(job_rent["quantity_required"].astype(float).sum()) if not job_rent.empty else 0.0
         total_required = float(job_req["quantity_required"].astype(float).sum()) if not job_req.empty else 0.0
-        ees_qty = float(job_manual["quantity_assigned"].astype(float).sum()) if not job_manual.empty else max(total_required - rental_qty, 0.0)
+
+        ees_qty = max(total_required - rental_qty, 0.0)
+        if not job_req.empty:
+            job_req_calc = job_req.copy()
+            job_req_calc["assigned_rental"] = 0.0
+            if not job_rent.empty:
+                rental_by_bucket = (
+                    job_rent.groupby(["job_id", "resource_class_id"], as_index=False)["quantity_required"]
+                    .sum()
+                    .rename(columns={"quantity_required": "assigned_rental"})
+                )
+                job_req_calc = job_req_calc.merge(rental_by_bucket, on=["job_id", "resource_class_id"], how="left", suffixes=("", "_rent"))
+                if "assigned_rental_rent" in job_req_calc.columns:
+                    job_req_calc["assigned_rental"] = job_req_calc["assigned_rental_rent"].fillna(job_req_calc["assigned_rental"])
+                    job_req_calc = job_req_calc.drop(columns=["assigned_rental_rent"])
+            job_req_calc["manual_assigned_ees"] = pd.NA
+            if not job_manual.empty:
+                if "requirement_id" in job_manual.columns:
+                    manual_by_req = (
+                        job_manual.groupby("requirement_id", as_index=False)["quantity_assigned"]
+                        .sum()
+                        .rename(columns={"quantity_assigned": "manual_assigned_ees"})
+                    )
+                    job_req_calc = job_req_calc.merge(manual_by_req, left_on="id", right_on="requirement_id", how="left")
+                    if "requirement_id" in job_req_calc.columns:
+                        job_req_calc = job_req_calc.drop(columns=["requirement_id"])
+                else:
+                    manual_by_bucket = (
+                        job_manual.groupby(["job_id", "resource_class_id"], as_index=False)["quantity_assigned"]
+                        .sum()
+                        .rename(columns={"quantity_assigned": "manual_assigned_ees"})
+                    )
+                    job_req_calc = job_req_calc.merge(manual_by_bucket, on=["job_id", "resource_class_id"], how="left")
+            job_req_calc["assigned_rental"] = job_req_calc["assigned_rental"].fillna(0.0).astype(float)
+            default_ees = (job_req_calc["quantity_required"].astype(float) - job_req_calc["assigned_rental"]).clip(lower=0)
+            job_req_calc["assigned_ees"] = pd.to_numeric(job_req_calc["manual_assigned_ees"], errors="coerce").fillna(default_ees)
+            ees_qty = float(job_req_calc["assigned_ees"].astype(float).sum())
+
         vendors = ", ".join(sorted(set(v for v in job_rent.get("vendor_name", pd.Series(dtype=str)).fillna("").tolist() if str(v).strip())))
         unit_label = str(rec["unit_type"]).title() if str(rec["unit_type"]).lower() == "miles" else str(rec["unit_type"])
 
