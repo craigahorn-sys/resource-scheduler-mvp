@@ -71,6 +71,24 @@ st.markdown(
         font-size: 0.95rem;
         line-height: 1.4;
     }
+    .planner-edit-col {
+        padding-top: 26px;
+    }
+    .planner-edit-col button[kind],
+    .planner-edit-col div[data-testid="stPopover"] > button {
+        min-height: 30px !important;
+        height: 30px !important;
+        padding: 0 8px !important;
+        font-size: 0.82rem !important;
+    }
+    .sidebar-section-label {
+        font-size: 0.8rem;
+        font-weight: 700;
+        color: #666;
+        letter-spacing: 0.02em;
+        margin-bottom: 0.2rem;
+        text-transform: uppercase;
+    }
     </style>
     ''',
     unsafe_allow_html=True,
@@ -941,15 +959,14 @@ def render_planning_board(active_region: str, include_excluded: bool = False, se
         )
 
     with edit_col:
-        st.markdown("**Edit**")
-        st.caption("Open requirement editor")
+        st.markdown('<div class="planner-edit-col">', unsafe_allow_html=True)
         for idx, row in board_df.iterrows():
             matches = planning_manage_df[
                 (planning_manage_df["job_id"] == row["job_id"])
                 & (planning_manage_df["class_name"] == selected_class)
             ].copy() if not planning_manage_df.empty else pd.DataFrame()
 
-            with st.popover(f"Edit", use_container_width=True):
+            with st.popover("Edit", use_container_width=True):
                 st.markdown(f"**{row['job_name']}**")
                 st.caption(selected_class)
                 if matches.empty:
@@ -1044,9 +1061,11 @@ def render_planning_board(active_region: str, include_excluded: bool = False, se
                     if b.button("Delete", key=f"planner_delete_{int(edit_row['id'])}"):
                         delete_requirement(engine, int(edit_row["id"]))
                         st.rerun()
+        st.markdown('</div>', unsafe_allow_html=True)
 
 with st.sidebar:
     st.header("Workspace")
+    st.markdown('<div class="sidebar-section-label">Region</div>', unsafe_allow_html=True)
 
     region_options = ["Select a region...", "Global"] + regions_df["region_code"].tolist()
 
