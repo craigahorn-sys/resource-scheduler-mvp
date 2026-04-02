@@ -564,7 +564,12 @@ def build_planning_board_data(active_region: str, selected_class: str | None, st
     if not class_options:
         return pd.DataFrame(), pd.DataFrame(), [], [], [], None, ""
 
-    if not selected_class or selected_class not in class_options:
+    if selected_class and selected_class not in class_options:
+        x0 = pd.to_datetime(start_date).normalize()
+        x_end = x0 + pd.Timedelta(days=7 * num_weeks)
+        return pd.DataFrame(), pd.DataFrame(), [], [], [], x_end, selected_class
+
+    if not selected_class:
         selected_class = class_options[0]
 
     req = req.loc[req["class_name"] == selected_class].copy() if not req.empty else pd.DataFrame()
@@ -733,10 +738,7 @@ def render_planning_board(active_region: str, include_excluded: bool = False, se
     active_planning_weeks_key = "planning_weeks_active"
 
     if include_excluded:
-        selected_class = st.session_state.get(active_planning_class_key)
-        if selected_class not in class_options:
-            selected_class = class_options[0]
-
+        selected_class = st.session_state.get(active_planning_class_key, class_options[0])
         board_start = st.session_state.get(active_planning_start_key, date.today())
         num_weeks = st.session_state.get(active_planning_weeks_key, 12)
 
