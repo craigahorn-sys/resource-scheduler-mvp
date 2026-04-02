@@ -241,6 +241,20 @@ def resource_options_df(include_rental: bool = False) -> pd.DataFrame:
     rc["display"] = rc.apply(display_class_name, axis=1)
     return rc
 
+
+def sort_by_resource_class_order(df: pd.DataFrame, extra_sort: list[str] | None = None) -> pd.DataFrame:
+    if df.empty or "class_name" not in df.columns:
+        return df
+    class_order = resource_classes_df["class_name"].dropna().astype(str).tolist()
+    order_map = {name: idx for idx, name in enumerate(class_order)}
+    working = df.copy()
+    working["_class_sort"] = working["class_name"].astype(str).map(order_map).fillna(999999)
+    sort_cols = ["_class_sort"]
+    if extra_sort:
+        sort_cols.extend([c for c in extra_sort if c in working.columns])
+    working = working.sort_values(by=sort_cols, kind="stable").drop(columns=["_class_sort"])
+    return working
+
 def render_jobs_manage_table(df: pd.DataFrame, active_region: str):
     st.markdown("##### Manage Jobs")
     if df.empty:
@@ -322,28 +336,28 @@ def render_requirements_manage_table(df: pd.DataFrame, key_prefix: str = 'req', 
         cols = st.columns(widths)
         customer_text = str(row.get("customer", "") or "Unassigned")
         job_name_text = str(row.get("job_name", "") or "")
-        fill = str(row.get("customer_color", "") or "") or customer_base_color(customer_text)
-        pill_bg = hex_to_rgba(fill, 0.18)
-        def render_cell(col, value, bold: bool = False, left_border: bool = False):
-            if highlight_by_job:
-                border_css = f"border-left:4px solid {fill};" if left_border else ""
-                weight_css = "font-weight:700;" if bold else ""
-                col.markdown(
-                    f"<div style='background:{pill_bg}; {border_css} border-radius:8px; padding:6px 8px; {weight_css}'>" + str(value) + "</div>",
-                    unsafe_allow_html=True,
-                )
-            else:
-                col.write(value)
-
-        render_cell(cols[0], customer_text, bold=True, left_border=True)
-        render_cell(cols[1], job_name_text)
-        render_cell(cols[2], str(row["job_code"]))
-        render_cell(cols[3], str(row["class_name"]))
-        render_cell(cols[4], format_compact_number(row["quantity_required"]))
-        render_cell(cols[5], format_compact_number(row.get("assigned_ees", 0)))
-        render_cell(cols[6], format_compact_number(row.get("assigned_rental", 0)))
-        render_cell(cols[7], str(row.get("allocation_status", "")))
-        render_cell(cols[8], str(row.get("notes", "") or ""))
+        if highlight_by_job:
+            fill = str(row.get("customer_color", "") or "") or customer_base_color(customer_text)
+            pill_bg = hex_to_rgba(fill, 0.18)
+            pill_border = hex_to_rgba(fill, 0.55)
+            cols[0].markdown(
+                f"<div style='background:{pill_bg}; border-left:4px solid {fill}; border-radius:8px; padding:6px 8px; font-weight:700;'>"                 f"{customer_text}</div>",
+                unsafe_allow_html=True,
+            )
+            cols[1].markdown(
+                f"<div style='background:{pill_bg}; border-radius:8px; padding:6px 8px;'>"                 f"{job_name_text}</div>",
+                unsafe_allow_html=True,
+            )
+        else:
+            cols[0].write(customer_text)
+            cols[1].write(job_name_text)
+        cols[2].write(str(row["job_code"]))
+        cols[3].write(str(row["class_name"]))
+        cols[4].write(format_compact_number(row["quantity_required"]))
+        cols[5].write(format_compact_number(row.get("assigned_ees", 0)))
+        cols[6].write(format_compact_number(row.get("assigned_rental", 0)))
+        cols[7].write(str(row.get("allocation_status", "")))
+        cols[8].write(str(row.get("notes", "") or ""))
 
         with cols[9].popover("Edit/Delete", use_container_width=True):
             legacy_class = str(row["class_name"])
@@ -1370,6 +1384,7 @@ with tab_job_requirements:
         st.subheader("Selected Job Requirement Summary")
         req_summary = region_filter(requirement_summary_df(engine), ACTIVE_REGION)
         selected_job_reqs = req_summary.loc[req_summary["job_code"] == selected_job["job_code"]].copy() if not req_summary.empty else pd.DataFrame()
+        selected_job_reqs = sort_by_resource_class_order(selected_job_reqs, extra_sort=["required_start", "id"])
         if selected_job_reqs.empty:
             st.info("No owned requirements yet for this job.")
         else:
@@ -1394,11 +1409,13 @@ with tab_job_requirements:
             manage_df["assigned_rental"] = manage_df["assigned_rental"].fillna(0.0)
             manage_df["assigned_ees"] = manage_df["manual_assigned_ees"].fillna((manage_df["quantity_required"].astype(float) - manage_df["assigned_rental"].astype(float)).clip(lower=0))
             manage_df["rental_vendor"] = manage_df["rental_vendor"].fillna("")
+            manage_df = sort_by_resource_class_order(manage_df, extra_sort=["required_start", "id"])
             render_requirements_manage_table(manage_df, key_prefix="jobreq")
 
         st.markdown("##### Selected Job Rental Requirements")
         rental_summary = region_filter(get_rental_requirements_df(engine), ACTIVE_REGION)
         selected_job_rentals = rental_summary.loc[rental_summary["job_code"] == selected_job["job_code"]].copy() if not rental_summary.empty else pd.DataFrame()
+        selected_job_rentals = sort_by_resource_class_order(selected_job_rentals, extra_sort=["required_start", "id"])
         if selected_job_rentals.empty:
             st.info("No rental requirements yet for this job.")
         else:
@@ -1506,6 +1523,7 @@ with tab_requirements:
 
     st.subheader("Requirement Summary")
     req_summary = region_filter(requirement_summary_df(engine), ACTIVE_REGION)
+    req_summary = sort_by_resource_class_order(req_summary, extra_sort=["job_name", "job_code", "required_start", "id"])
     if req_summary.empty:
         st.info("No requirements yet.")
     else:
@@ -1528,6 +1546,7 @@ with tab_requirements:
         manage_df["assigned_rental"] = manage_df["assigned_rental"].fillna(0.0)
         manage_df["assigned_ees"] = manage_df["manual_assigned_ees"].fillna((manage_df["quantity_required"].astype(float) - manage_df["assigned_rental"].astype(float)).clip(lower=0))
         manage_df["rental_vendor"] = manage_df["rental_vendor"].fillna("")
+        manage_df = sort_by_resource_class_order(manage_df, extra_sort=["job_name", "job_code", "required_start", "id"])
         render_requirements_manage_table(manage_df)
 
 with tab_planning:
