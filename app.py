@@ -322,29 +322,28 @@ def render_requirements_manage_table(df: pd.DataFrame, key_prefix: str = 'req', 
         cols = st.columns(widths)
         customer_text = str(row.get("customer", "") or "Unassigned")
         job_name_text = str(row.get("job_name", "") or "")
-
-        def render_manage_cell(col, value: str, *, bold: bool = False, left_border: bool = False):
-            if highlight_by_job:
-                fill = str(row.get("customer_color", "") or "") or customer_base_color(customer_text)
-                pill_bg = hex_to_rgba(fill, 0.18)
-                border_css = f"border-left:4px solid {fill};" if left_border else ""
-                weight_css = "font-weight:700;" if bold else ""
-                col.markdown(
-                    f"<div style='background:{pill_bg}; {border_css} border-radius:8px; padding:6px 8px; {weight_css}'>"                     f"{value}</div>",
-                    unsafe_allow_html=True,
-                )
-            else:
-                col.write(value)
-
-        render_manage_cell(cols[0], customer_text, bold=True, left_border=True)
-        render_manage_cell(cols[1], job_name_text)
-        render_manage_cell(cols[2], str(row["job_code"]))
-        render_manage_cell(cols[3], str(row["class_name"]))
-        render_manage_cell(cols[4], format_compact_number(row["quantity_required"]))
-        render_manage_cell(cols[5], format_compact_number(row.get("assigned_ees", 0)))
-        render_manage_cell(cols[6], format_compact_number(row.get("assigned_rental", 0)))
-        render_manage_cell(cols[7], str(row.get("allocation_status", "")))
-        render_manage_cell(cols[8], str(row.get("notes", "") or ""))
+        if highlight_by_job:
+            fill = str(row.get("customer_color", "") or "") or customer_base_color(customer_text)
+            pill_bg = hex_to_rgba(fill, 0.18)
+            pill_border = hex_to_rgba(fill, 0.55)
+            cols[0].markdown(
+                f"<div style='background:{pill_bg}; border-left:4px solid {fill}; border-radius:8px; padding:6px 8px; font-weight:700;'>"                 f"{customer_text}</div>",
+                unsafe_allow_html=True,
+            )
+            cols[1].markdown(
+                f"<div style='background:{pill_bg}; border-radius:8px; padding:6px 8px;'>"                 f"{job_name_text}</div>",
+                unsafe_allow_html=True,
+            )
+        else:
+            cols[0].write(customer_text)
+            cols[1].write(job_name_text)
+        cols[2].write(str(row["job_code"]))
+        cols[3].write(str(row["class_name"]))
+        cols[4].write(format_compact_number(row["quantity_required"]))
+        cols[5].write(format_compact_number(row.get("assigned_ees", 0)))
+        cols[6].write(format_compact_number(row.get("assigned_rental", 0)))
+        cols[7].write(str(row.get("allocation_status", "")))
+        cols[8].write(str(row.get("notes", "") or ""))
 
         with cols[9].popover("Edit/Delete", use_container_width=True):
             legacy_class = str(row["class_name"])
@@ -1064,14 +1063,19 @@ def render_planning_board(active_region: str, include_excluded: bool = False, se
         manage_df = req_manage.copy()
         manage_df = manage_df.merge(rental_manage, on=["job_id", "resource_class_id"], how="left")
         manage_df = manage_df.merge(manual_manage, on=["job_id", "resource_class_id"], how="left")
+        if "quantity_required" not in manage_df.columns:
+            manage_df["quantity_required"] = 0.0
         if "assigned_rental" not in manage_df.columns:
             manage_df["assigned_rental"] = 0.0
         if "manual_assigned_ees" not in manage_df.columns:
             manage_df["manual_assigned_ees"] = None
         if "rental_vendor" not in manage_df.columns:
             manage_df["rental_vendor"] = ""
-        manage_df["assigned_rental"] = manage_df["assigned_rental"].fillna(0.0)
-        manage_df["assigned_ees"] = manage_df["manual_assigned_ees"].fillna((manage_df["quantity_required"].astype(float) - manage_df["assigned_rental"].astype(float)).clip(lower=0))
+        manage_df["quantity_required"] = pd.to_numeric(manage_df["quantity_required"], errors="coerce").fillna(0.0)
+        manage_df["assigned_rental"] = pd.to_numeric(manage_df["assigned_rental"], errors="coerce").fillna(0.0)
+        manage_df["assigned_ees"] = pd.to_numeric(manage_df["manual_assigned_ees"], errors="coerce").fillna(
+            (manage_df["quantity_required"] - manage_df["assigned_rental"]).clip(lower=0)
+        )
         manage_df["rental_vendor"] = manage_df["rental_vendor"].fillna("")
         manage_df = sort_requirements_like_board(manage_df, board_df)
         render_requirements_manage_table(manage_df, key_prefix="boardreq_pipeline" if include_excluded else "boardreq_active", highlight_by_job=True)
