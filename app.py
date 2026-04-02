@@ -7,7 +7,7 @@ import plotly.graph_objects as go
 import colorsys
 import streamlit as st
 
-from services.db import execute, export_excel, get_engine, init_db, query_df
+from services.db import export_excel, get_engine, init_db, query_df
 from services.models import calc_job_dates
 from services.scheduler import (
     add_pool_adjustment, allocation_debug_df, create_job, create_requirement, delete_job,
@@ -83,15 +83,8 @@ try:
     query_df(engine, "SELECT customer_color FROM jobs LIMIT 1")
 except Exception:
     try:
+        from services.db import execute
         execute(engine, "ALTER TABLE jobs ADD COLUMN customer_color TEXT")
-    except Exception:
-        pass
-
-try:
-    query_df(engine, "SELECT requirement_id FROM job_manual_owned_allocations LIMIT 1")
-except Exception:
-    try:
-        execute(engine, "ALTER TABLE job_manual_owned_allocations ADD COLUMN requirement_id BIGINT")
     except Exception:
         pass
 
@@ -128,17 +121,19 @@ def build_manual_manage_df(req_df: pd.DataFrame, manual_df: pd.DataFrame) -> pd.
     if manual_df.empty or "quantity_assigned" not in manual_df.columns:
         return result[["id", "manual_assigned_ees"]]
 
+    row_specific = pd.DataFrame(columns=["requirement_id", "quantity_assigned"])
     if "requirement_id" in manual_df.columns:
         row_specific = manual_df.loc[manual_df["requirement_id"].notna(), ["requirement_id", "quantity_assigned"]].copy()
-    else:
-        row_specific = pd.DataFrame(columns=["requirement_id", "quantity_assigned"])
 
     if not row_specific.empty:
+        row_specific["requirement_id"] = pd.to_numeric(row_specific["requirement_id"], errors="coerce")
+        row_specific = row_specific.dropna(subset=["requirement_id"]).copy()
         row_specific["requirement_id"] = row_specific["requirement_id"].astype(int)
         row_specific = row_specific.groupby("requirement_id", as_index=False)["quantity_assigned"].sum()
         result = result.merge(row_specific, left_on="id", right_on="requirement_id", how="left")
         result["manual_assigned_ees"] = result["quantity_assigned"]
-        result = result.drop(columns=["requirement_id", "quantity_assigned"])
+        drop_cols = [c for c in ["requirement_id", "quantity_assigned"] if c in result.columns]
+        result = result.drop(columns=drop_cols)
 
     legacy_manual = manual_df.copy()
     if "requirement_id" in legacy_manual.columns:
@@ -149,16 +144,28 @@ def build_manual_manage_df(req_df: pd.DataFrame, manual_df: pd.DataFrame) -> pd.
         legacy_manual = legacy_manual.groupby(["job_id", "resource_class_id"], as_index=False)["quantity_assigned"].sum()
         legacy_manual = legacy_manual.merge(req_counts, on=["job_id", "resource_class_id"], how="left")
         legacy_manual = legacy_manual.loc[legacy_manual["req_count"] == 1, ["job_id", "resource_class_id", "quantity_assigned"]]
-        if not legacy_manual.empty:
-            result = result.merge(
-                legacy_manual.rename(columns={"quantity_assigned": "legacy_manual_assigned_ees"}),
-                on=["job_id", "resource_class_id"],
-                how="left",
-            )
-            result["manual_assigned_ees"] = result["manual_assigned_ees"].fillna(result["legacy_manual_assigned_ees"])
-            result = result.drop(columns=["legacy_manual_assigned_ees"])
+        result = result.merge(legacy_manual, on=["job_id", "resource_class_id"], how="left", suffixes=("", "_legacy"))
+        result["manual_assigned_ees"] = result["manual_assigned_ees"].where(result["manual_assigned_ees"].notna(), result["quantity_assigned"])
+        if "quantity_assigned" in result.columns:
+            result = result.drop(columns=["quantity_assigned"])
 
     return result[["id", "manual_assigned_ees"]]
+
+
+def sort_requirements_like_board(df: pd.DataFrame, board_df: pd.DataFrame) -> pd.DataFrame:
+    if df.empty or board_df.empty or "job_code" not in df.columns:
+        return df
+    working = df.copy()
+    board_order = {job_code: idx for idx, job_code in enumerate(board_df["job_code"].astype(str).tolist())}
+    working["_board_order"] = working["job_code"].astype(str).map(board_order).fillna(10**6)
+    sort_cols = ["_board_order"]
+    ascending = [True]
+    for col in ["required_start", "job_name", "job_code", "id"]:
+        if col in working.columns:
+            sort_cols.append(col)
+            ascending.append(True)
+    working = working.sort_values(sort_cols, ascending=ascending, kind="stable").drop(columns=["_board_order"])
+    return working
 
 def region_filter(df: pd.DataFrame, active_region: str) -> pd.DataFrame:
     if df.empty or active_region == "Global" or "region_code" not in df.columns:
@@ -393,7 +400,6 @@ def render_requirements_manage_table(df: pd.DataFrame, key_prefix: str = 'req'):
             )
             a, b = st.columns(2)
             if a.button("Save", key=f"{key_prefix}_save_{row['id']}"):
-                capped_assigned_ees = min(float(edit_assigned_ees), float(edit_qty))
                 update_requirement(
                     engine,
                     int(row["id"]),
@@ -410,11 +416,10 @@ def render_requirements_manage_table(df: pd.DataFrame, key_prefix: str = 'req'):
                     engine,
                     int(row["job_id"]),
                     int(edit_rc_id),
-                    capped_assigned_ees,
+                    float(edit_assigned_ees),
                     int(edit_before),
                     int(edit_after),
                     edit_notes,
-                    requirement_id=int(row["id"]),
                 )
                 upsert_rental_requirement_for_job_class(
                     engine,
@@ -684,56 +689,7 @@ def build_planning_board_data(active_region: str, selected_class: str | None, st
 
         rental_qty = float(job_rent["quantity_required"].astype(float).sum()) if not job_rent.empty else 0.0
         total_required = float(job_req["quantity_required"].astype(float).sum()) if not job_req.empty else 0.0
-
-        ees_qty = max(total_required - rental_qty, 0.0)
-        if not job_req.empty:
-            job_req_calc = job_req.copy()
-            job_req_calc["assigned_rental"] = 0.0
-            if not job_rent.empty:
-                rental_by_bucket = (
-                    job_rent.groupby(["job_id", "resource_class_id"], as_index=False)["quantity_required"]
-                    .sum()
-                    .rename(columns={"quantity_required": "assigned_rental"})
-                )
-                job_req_calc = job_req_calc.merge(rental_by_bucket, on=["job_id", "resource_class_id"], how="left", suffixes=("", "_rent"))
-                if "assigned_rental_rent" in job_req_calc.columns:
-                    job_req_calc["assigned_rental"] = job_req_calc["assigned_rental_rent"].fillna(job_req_calc["assigned_rental"])
-                    job_req_calc = job_req_calc.drop(columns=["assigned_rental_rent"])
-            if not job_manual.empty:
-                if "requirement_id" in job_manual.columns:
-                    manual_by_req = (
-                        job_manual.groupby("requirement_id", as_index=False)["quantity_assigned"]
-                        .sum()
-                        .rename(columns={"quantity_assigned": "manual_assigned_ees"})
-                    )
-                    job_req_calc = job_req_calc.merge(manual_by_req, left_on="id", right_on="requirement_id", how="left")
-                    if "requirement_id" in job_req_calc.columns:
-                        job_req_calc = job_req_calc.drop(columns=["requirement_id"])
-                else:
-                    manual_by_bucket = (
-                        job_manual.groupby(["job_id", "resource_class_id"], as_index=False)["quantity_assigned"]
-                        .sum()
-                        .rename(columns={"quantity_assigned": "manual_assigned_ees"})
-                    )
-                    job_req_calc = job_req_calc.merge(manual_by_bucket, on=["job_id", "resource_class_id"], how="left")
-
-            if "manual_assigned_ees" not in job_req_calc.columns:
-                job_req_calc["manual_assigned_ees"] = pd.NA
-            elif "manual_assigned_ees_x" in job_req_calc.columns or "manual_assigned_ees_y" in job_req_calc.columns:
-                left_col = pd.to_numeric(job_req_calc.get("manual_assigned_ees_x"), errors="coerce") if "manual_assigned_ees_x" in job_req_calc.columns else pd.Series(pd.NA, index=job_req_calc.index)
-                right_col = pd.to_numeric(job_req_calc.get("manual_assigned_ees_y"), errors="coerce") if "manual_assigned_ees_y" in job_req_calc.columns else pd.Series(pd.NA, index=job_req_calc.index)
-                job_req_calc["manual_assigned_ees"] = left_col.fillna(right_col)
-                drop_cols = [c for c in ["manual_assigned_ees_x", "manual_assigned_ees_y"] if c in job_req_calc.columns]
-                if drop_cols:
-                    job_req_calc = job_req_calc.drop(columns=drop_cols)
-
-            if "assigned_rental" not in job_req_calc.columns:
-                job_req_calc["assigned_rental"] = 0.0
-            job_req_calc["assigned_rental"] = pd.to_numeric(job_req_calc["assigned_rental"], errors="coerce").fillna(0.0).astype(float)
-            default_ees = (job_req_calc["quantity_required"].astype(float) - job_req_calc["assigned_rental"]).clip(lower=0)
-            job_req_calc["assigned_ees"] = pd.to_numeric(job_req_calc["manual_assigned_ees"], errors="coerce").fillna(default_ees)
-            ees_qty = float(job_req_calc["assigned_ees"].astype(float).sum())
-
+        ees_qty = float(job_manual["quantity_assigned"].astype(float).sum()) if not job_manual.empty else max(total_required - rental_qty, 0.0)
         vendors = ", ".join(sorted(set(v for v in job_rent.get("vendor_name", pd.Series(dtype=str)).fillna("").tolist() if str(v).strip())))
         unit_label = str(rec["unit_type"]).title() if str(rec["unit_type"]).lower() == "miles" else str(rec["unit_type"])
 
@@ -1111,6 +1067,8 @@ with tab_jobs:
             st.rerun()
 
     jobs_df = filter_active_jobs_for_management(region_filter(get_jobs_df(engine), ACTIVE_REGION))
+    if not jobs_df.empty and "job_start_date" in jobs_df.columns:
+        jobs_df = jobs_df.sort_values(["job_start_date", "mob_start_date", "job_name", "job_code"], ascending=[True, True, True, True], kind="stable")
     render_jobs_manage_table(jobs_df, ACTIVE_REGION)
 
 
@@ -1310,10 +1268,12 @@ with tab_job_requirements:
                     rental_vendor=("vendor_name", lambda s: ", ".join(sorted({str(v).strip() for v in s if str(v).strip()}))),
                 )
             manual_manage = region_filter(get_manual_owned_allocations_df(engine), ACTIVE_REGION)
-            manual_manage = manual_manage[["job_id", "resource_class_id", "requirement_id", "quantity_assigned"]].copy() if not manual_manage.empty else pd.DataFrame(columns=["job_id", "resource_class_id", "requirement_id", "quantity_assigned"])
+            manual_manage = manual_manage[["job_id", "resource_class_id", "quantity_assigned"]].copy() if not manual_manage.empty else pd.DataFrame(columns=["job_id", "resource_class_id", "quantity_assigned"])
+            if not manual_manage.empty:
+                manual_manage = manual_manage.groupby(["job_id", "resource_class_id"], as_index=False)["quantity_assigned"].sum().rename(columns={"quantity_assigned": "manual_assigned_ees"})
             manage_df = selected_job_reqs.copy()
             manage_df = manage_df.merge(rental_manage, on=["job_id", "resource_class_id"], how="left")
-            manage_df = manage_df.merge(build_manual_manage_df(manage_df, manual_manage), on="id", how="left")
+            manage_df = manage_df.merge(manual_manage, on=["job_id", "resource_class_id"], how="left")
             manage_df["assigned_rental"] = manage_df["assigned_rental"].fillna(0.0)
             manage_df["assigned_ees"] = manage_df["manual_assigned_ees"].fillna((manage_df["quantity_required"].astype(float) - manage_df["assigned_rental"].astype(float)).clip(lower=0))
             manage_df["rental_vendor"] = manage_df["rental_vendor"].fillna("")
@@ -1444,10 +1404,12 @@ with tab_requirements:
             )
             
         manual_manage = region_filter(get_manual_owned_allocations_df(engine), ACTIVE_REGION)
-        manual_manage = manual_manage[["job_id", "resource_class_id", "requirement_id", "quantity_assigned"]].copy() if not manual_manage.empty else pd.DataFrame(columns=["job_id", "resource_class_id", "requirement_id", "quantity_assigned"])
+        manual_manage = manual_manage[["job_id", "resource_class_id", "quantity_assigned"]].copy() if not manual_manage.empty else pd.DataFrame(columns=["job_id", "resource_class_id", "quantity_assigned"])
+        if not manual_manage.empty:
+            manual_manage = manual_manage.groupby(["job_id", "resource_class_id"], as_index=False)["quantity_assigned"].sum().rename(columns={"quantity_assigned": "manual_assigned_ees"})
         manage_df = req_summary.copy()
         manage_df = manage_df.merge(rental_manage, on=["job_id", "resource_class_id"], how="left")
-        manage_df = manage_df.merge(build_manual_manage_df(manage_df, manual_manage), on="id", how="left")
+        manage_df = manage_df.merge(manual_manage, on=["job_id", "resource_class_id"], how="left")
         manage_df["assigned_rental"] = manage_df["assigned_rental"].fillna(0.0)
         manage_df["assigned_ees"] = manage_df["manual_assigned_ees"].fillna((manage_df["quantity_required"].astype(float) - manage_df["assigned_rental"].astype(float)).clip(lower=0))
         manage_df["rental_vendor"] = manage_df["rental_vendor"].fillna("")
