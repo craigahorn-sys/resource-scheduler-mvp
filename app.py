@@ -322,28 +322,29 @@ def render_requirements_manage_table(df: pd.DataFrame, key_prefix: str = 'req', 
         cols = st.columns(widths)
         customer_text = str(row.get("customer", "") or "Unassigned")
         job_name_text = str(row.get("job_name", "") or "")
-        if highlight_by_job:
-            fill = str(row.get("customer_color", "") or "") or customer_base_color(customer_text)
-            pill_bg = hex_to_rgba(fill, 0.18)
-            pill_border = hex_to_rgba(fill, 0.55)
-            cols[0].markdown(
-                f"<div style='background:{pill_bg}; border-left:4px solid {fill}; border-radius:8px; padding:6px 8px; font-weight:700;'>"                 f"{customer_text}</div>",
-                unsafe_allow_html=True,
-            )
-            cols[1].markdown(
-                f"<div style='background:{pill_bg}; border-radius:8px; padding:6px 8px;'>"                 f"{job_name_text}</div>",
-                unsafe_allow_html=True,
-            )
-        else:
-            cols[0].write(customer_text)
-            cols[1].write(job_name_text)
-        cols[2].write(str(row["job_code"]))
-        cols[3].write(str(row["class_name"]))
-        cols[4].write(format_compact_number(row["quantity_required"]))
-        cols[5].write(format_compact_number(row.get("assigned_ees", 0)))
-        cols[6].write(format_compact_number(row.get("assigned_rental", 0)))
-        cols[7].write(str(row.get("allocation_status", "")))
-        cols[8].write(str(row.get("notes", "") or ""))
+
+        def render_manage_cell(col, value: str, *, bold: bool = False, left_border: bool = False):
+            if highlight_by_job:
+                fill = str(row.get("customer_color", "") or "") or customer_base_color(customer_text)
+                pill_bg = hex_to_rgba(fill, 0.18)
+                border_css = f"border-left:4px solid {fill};" if left_border else ""
+                weight_css = "font-weight:700;" if bold else ""
+                col.markdown(
+                    f"<div style='background:{pill_bg}; {border_css} border-radius:8px; padding:6px 8px; {weight_css}'>"                     f"{value}</div>",
+                    unsafe_allow_html=True,
+                )
+            else:
+                col.write(value)
+
+        render_manage_cell(cols[0], customer_text, bold=True, left_border=True)
+        render_manage_cell(cols[1], job_name_text)
+        render_manage_cell(cols[2], str(row["job_code"]))
+        render_manage_cell(cols[3], str(row["class_name"]))
+        render_manage_cell(cols[4], format_compact_number(row["quantity_required"]))
+        render_manage_cell(cols[5], format_compact_number(row.get("assigned_ees", 0)))
+        render_manage_cell(cols[6], format_compact_number(row.get("assigned_rental", 0)))
+        render_manage_cell(cols[7], str(row.get("allocation_status", "")))
+        render_manage_cell(cols[8], str(row.get("notes", "") or ""))
 
         with cols[9].popover("Edit/Delete", use_container_width=True):
             legacy_class = str(row["class_name"])
