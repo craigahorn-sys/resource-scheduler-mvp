@@ -1094,13 +1094,11 @@ def render_planning_board(active_region: str, include_excluded: bool = False, se
 
         manual_manage = filter_by_job_status(region_filter(get_manual_owned_allocations_df(engine), active_region), include_excluded=include_excluded)
         manual_manage = manual_manage.loc[manual_manage["class_name"] == selected_class].copy() if not manual_manage.empty else pd.DataFrame()
-        manual_manage = manual_manage[["job_id", "resource_class_id", "quantity_assigned"]].copy() if not manual_manage.empty else pd.DataFrame(columns=["job_id", "resource_class_id", "quantity_assigned"])
-        if not manual_manage.empty:
-            manual_manage = manual_manage.groupby(["job_id", "resource_class_id"], as_index=False)["quantity_assigned"].sum().rename(columns={"quantity_assigned": "manual_assigned_ees"})
 
         manage_df = req_manage.copy()
         manage_df = manage_df.merge(rental_manage, on=["job_id", "resource_class_id"], how="left")
-        manage_df = manage_df.merge(manual_manage, on=["job_id", "resource_class_id"], how="left")
+        manual_manage_df = build_manual_manage_df(manage_df, manual_manage)
+        manage_df = manage_df.merge(manual_manage_df, on="id", how="left")
         if "quantity_required" not in manage_df.columns:
             manage_df["quantity_required"] = 0.0
         if "assigned_rental" not in manage_df.columns:
@@ -1226,6 +1224,8 @@ with tab_jobs:
             st.rerun()
 
     jobs_df = filter_active_jobs_for_management(region_filter(get_jobs_df(engine), ACTIVE_REGION))
+    if not jobs_df.empty and "job_start_date" in jobs_df.columns:
+        jobs_df = jobs_df.sort_values(["job_start_date", "mob_start_date", "job_name", "job_code"], ascending=[True, True, True, True]).reset_index(drop=True)
     render_jobs_manage_table(jobs_df, ACTIVE_REGION)
 
 
