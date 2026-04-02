@@ -698,7 +698,6 @@ def build_planning_board_data(active_region: str, selected_class: str | None, st
                 if "assigned_rental_rent" in job_req_calc.columns:
                     job_req_calc["assigned_rental"] = job_req_calc["assigned_rental_rent"].fillna(job_req_calc["assigned_rental"])
                     job_req_calc = job_req_calc.drop(columns=["assigned_rental_rent"])
-            job_req_calc["manual_assigned_ees"] = pd.NA
             if not job_manual.empty:
                 if "requirement_id" in job_manual.columns:
                     manual_by_req = (
@@ -716,7 +715,20 @@ def build_planning_board_data(active_region: str, selected_class: str | None, st
                         .rename(columns={"quantity_assigned": "manual_assigned_ees"})
                     )
                     job_req_calc = job_req_calc.merge(manual_by_bucket, on=["job_id", "resource_class_id"], how="left")
-            job_req_calc["assigned_rental"] = job_req_calc["assigned_rental"].fillna(0.0).astype(float)
+
+            if "manual_assigned_ees" not in job_req_calc.columns:
+                job_req_calc["manual_assigned_ees"] = pd.NA
+            elif "manual_assigned_ees_x" in job_req_calc.columns or "manual_assigned_ees_y" in job_req_calc.columns:
+                left_col = pd.to_numeric(job_req_calc.get("manual_assigned_ees_x"), errors="coerce") if "manual_assigned_ees_x" in job_req_calc.columns else pd.Series(pd.NA, index=job_req_calc.index)
+                right_col = pd.to_numeric(job_req_calc.get("manual_assigned_ees_y"), errors="coerce") if "manual_assigned_ees_y" in job_req_calc.columns else pd.Series(pd.NA, index=job_req_calc.index)
+                job_req_calc["manual_assigned_ees"] = left_col.fillna(right_col)
+                drop_cols = [c for c in ["manual_assigned_ees_x", "manual_assigned_ees_y"] if c in job_req_calc.columns]
+                if drop_cols:
+                    job_req_calc = job_req_calc.drop(columns=drop_cols)
+
+            if "assigned_rental" not in job_req_calc.columns:
+                job_req_calc["assigned_rental"] = 0.0
+            job_req_calc["assigned_rental"] = pd.to_numeric(job_req_calc["assigned_rental"], errors="coerce").fillna(0.0).astype(float)
             default_ees = (job_req_calc["quantity_required"].astype(float) - job_req_calc["assigned_rental"]).clip(lower=0)
             job_req_calc["assigned_ees"] = pd.to_numeric(job_req_calc["manual_assigned_ees"], errors="coerce").fillna(default_ees)
             ees_qty = float(job_req_calc["assigned_ees"].astype(float).sum())
