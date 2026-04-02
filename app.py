@@ -19,7 +19,7 @@ from services.scheduler import (
     upsert_manual_owned_allocation_for_job_class, upsert_rental_requirement_for_job_class,
 )
 
-st.set_page_config(page_title="Resource Scheduler V2", layout="wide")
+st.set_page_config(page_title="Resource Scheduler V2", layout="wide", initial_sidebar_state="expanded")
 st.title("Resource Scheduler V2")
 
 EXCLUDED_CALC_STATUSES = {"Bid", "Awarded"}
@@ -76,14 +76,6 @@ st.markdown(
         height: 30px !important;
         padding: 0 8px !important;
         font-size: 0.82rem !important;
-    }
-    .sidebar-section-label {
-        font-size: 0.8rem;
-        font-weight: 700;
-        color: #666;
-        letter-spacing: 0.02em;
-        margin-bottom: 0.2rem;
-        text-transform: uppercase;
     }
     </style>
     ''',
@@ -932,7 +924,7 @@ def render_planning_board(active_region: str, include_excluded: bool = False, se
     )
     planning_manage_df = build_requirements_manage_df(active_region, include_excluded=include_excluded)
 
-    board_col, edit_col = st.columns([14, 2], vertical_alignment="top")
+    board_col, edit_col = st.columns([16, 0.6], vertical_alignment="top")
     with board_col:
         st.plotly_chart(
             fig,
@@ -955,13 +947,31 @@ def render_planning_board(active_region: str, include_excluded: bool = False, se
         )
 
     with edit_col:
+        st.markdown(
+            """
+            <style>
+            .planner-edit-spacer { height: 34px; }
+            div[data-testid="stPopover"] > button {
+                min-height: 24px !important;
+                height: 24px !important;
+                width: 34px !important;
+                min-width: 34px !important;
+                padding: 0 !important;
+                font-size: 0.72rem !important;
+                line-height: 1 !important;
+            }
+            </style>
+            """,
+            unsafe_allow_html=True,
+        )
+        st.markdown('<div class="planner-edit-spacer"></div>', unsafe_allow_html=True)
         for idx, row in board_df.iterrows():
             matches = planning_manage_df[
                 (planning_manage_df["job_id"] == row["job_id"])
                 & (planning_manage_df["class_name"] == selected_class)
             ].copy() if not planning_manage_df.empty else pd.DataFrame()
 
-            with st.popover("Edit", use_container_width=True):
+            with st.popover("✎", use_container_width=False):
                 st.markdown(f"**{row['job_name']}**")
                 st.caption(selected_class)
                 if matches.empty:
@@ -1056,10 +1066,10 @@ def render_planning_board(active_region: str, include_excluded: bool = False, se
                     if b.button("Delete", key=f"planner_delete_{int(edit_row['id'])}"):
                         delete_requirement(engine, int(edit_row["id"]))
                         st.rerun()
+            st.markdown('<div class="planner-edit-spacer"></div>', unsafe_allow_html=True)
 
 with st.sidebar:
     st.header("Workspace")
-    st.markdown('<div class="sidebar-section-label">Region</div>', unsafe_allow_html=True)
 
     region_options = ["Select a region...", "Global"] + regions_df["region_code"].tolist()
 
