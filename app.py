@@ -71,11 +71,7 @@ st.markdown(
         font-size: 0.95rem;
         line-height: 1.4;
     }
-    .planner-edit-col {
-        padding-top: 26px;
-    }
-    .planner-edit-col button[kind],
-    .planner-edit-col div[data-testid="stPopover"] > button {
+    div[data-testid="stPopover"] > button {
         min-height: 30px !important;
         height: 30px !important;
         padding: 0 8px !important;
@@ -959,7 +955,6 @@ def render_planning_board(active_region: str, include_excluded: bool = False, se
         )
 
     with edit_col:
-        st.markdown('<div class="planner-edit-col">', unsafe_allow_html=True)
         for idx, row in board_df.iterrows():
             matches = planning_manage_df[
                 (planning_manage_df["job_id"] == row["job_id"])
@@ -1061,7 +1056,6 @@ def render_planning_board(active_region: str, include_excluded: bool = False, se
                     if b.button("Delete", key=f"planner_delete_{int(edit_row['id'])}"):
                         delete_requirement(engine, int(edit_row["id"]))
                         st.rerun()
-        st.markdown('</div>', unsafe_allow_html=True)
 
 with st.sidebar:
     st.header("Workspace")
