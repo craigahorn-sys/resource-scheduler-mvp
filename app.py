@@ -712,7 +712,121 @@ def build_planning_board_data(active_region: str, selected_class: str | None, st
     summary_df = pd.DataFrame(summary_rows)
     return board_df, summary_df, gridlines, tickvals, ticktext, x_end, selected_class
 
+def render_planning_board_edit_column(board_df, selected_class, active_region):
+    st.markdown("##### Edit")
 
+    if board_df.empty:
+        return
+
+    req_df = requirement_summary_df(engine)
+    req_df = region_filter(req_df, active_region)
+
+    for i, row in board_df.iterrows():
+        job_code = str(row["job_code"])
+
+        matching = req_df[
+            (req_df["job_code"].astype(str) == job_code) &
+            (req_df["class_name"].astype(str) == selected_class)
+        ]
+
+        if matching.empty:
+            st.write("")
+            continue
+
+        if len(matching) > 1:
+            selected_req = st.selectbox(
+                "Select",
+                matching["id"].tolist(),
+                format_func=lambda x: f"Req {x}",
+                key=f"board_select_{job_code}_{i}"
+            )
+            req_row = matching.loc[matching["id"] == selected_req].iloc[0]
+        else:
+            req_row = matching.iloc[0]
+
+        with st.popover("✏️", use_container_width=True):
+
+            st.markdown("### Edit Requirement + Job")
+
+            # -------------------
+            # JOB FIELDS
+            # -------------------
+            job = get_jobs_df(engine)
+            job = job.loc[job["job_code"] == job_code].iloc[0]
+
+            edit_job_name = st.text_input("Job Name", value=job["job_name"])
+            edit_customer = st.text_input("Customer", value=job.get("customer", ""))
+            edit_location = st.text_input("Location", value=job.get("location", ""))
+
+            edit_start = st.date_input("Job Start", value=pd.to_datetime(job["job_start_date"]).date())
+            edit_duration = st.number_input("Duration", value=int(job["job_duration_days"]), min_value=1)
+
+            edit_mob = st.number_input("Mob Days", value=int(job["mob_days_before_job"]))
+            edit_demob = st.number_input("Demob Days", value=int(job["demob_days_after_job"]))
+
+            edit_notes_job = st.text_area("Job Notes", value=job.get("notes", ""))
+
+            # -------------------
+            # REQUIREMENT FIELDS
+            # -------------------
+            edit_qty = st.number_input("Quantity Required", value=float(req_row["quantity_required"]), min_value=0.0)
+            edit_ees = st.number_input("Assigned EES", value=float(req_row.get("assigned_ees", 0.0)), min_value=0.0)
+
+            edit_before = st.number_input("Days Before", value=int(req_row["days_before_job_start"]))
+            edit_after = st.number_input("Days After", value=int(req_row["days_after_job_end"]))
+
+            edit_notes_req = st.text_area("Requirement Notes", value=req_row.get("notes", ""))
+
+            # -------------------
+            # ACTIONS
+            # -------------------
+            col1, col2 = st.columns(2)
+
+            if col1.button("Save Changes", key=f"board_save_{req_row['id']}"):
+                capped_ees = min(edit_ees, edit_qty)
+
+                update_job(engine, int(job["id"]), {
+                    "job_name": edit_job_name,
+                    "customer": edit_customer,
+                    "location": edit_location,
+                    "job_start_date": edit_start,
+                    "job_duration_days": int(edit_duration),
+                    "mob_days_before_job": int(edit_mob),
+                    "demob_days_after_job": int(edit_demob),
+                    "notes": edit_notes_job,
+                })
+
+                update_requirement(engine, int(req_row["id"]), {
+                    "resource_class_id": int(req_row["resource_class_id"]),
+                    "quantity_required": float(edit_qty),
+                    "days_before_job_start": int(edit_before),
+                    "days_after_job_end": int(edit_after),
+                    "priority": req_row.get("priority", "Normal"),
+                    "notes": edit_notes_req,
+                })
+
+                upsert_manual_owned_allocation_for_job_class(
+                    engine,
+                    int(req_row["job_id"]),
+                    int(req_row["resource_class_id"]),
+                    float(capped_ees),
+                    int(edit_before),
+                    int(edit_after),
+                    edit_notes_req,
+                    requirement_id=int(req_row["id"]),
+                )
+
+                st.rerun()
+
+            if col2.button("Delete Requirement", key=f"board_delete_{req_row['id']}"):
+                if st.confirm("Delete this requirement?"):
+                    delete_requirement(engine, int(req_row["id"]))
+                    st.rerun()
+
+            if st.button("Delete Job", key=f"board_delete_job_{job['id']}"):
+                if st.confirm("Delete entire job?"):
+                    delete_job(engine, int(job["id"]))
+                    st.rerun()
 
 def render_planning_board(active_region: str, include_excluded: bool = False, section_title: str = "Planning Board"):
     st.subheader(section_title)
