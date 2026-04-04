@@ -219,6 +219,21 @@ def display_class_name(row: pd.Series) -> str:
         return f"{name} (miles)"
     return name
 
+def sort_requirements_like_board(df: pd.DataFrame, board_df: pd.DataFrame) -> pd.DataFrame:
+    if df.empty or board_df.empty or "job_code" not in df.columns:
+        return df
+    working = df.copy()
+    board_order = {job_code: idx for idx, job_code in enumerate(board_df["job_code"].astype(str).tolist())}
+    working["_board_order"] = working["job_code"].astype(str).map(board_order).fillna(10**6)
+    sort_cols = ["_board_order"]
+    ascending = [True]
+    for col in ["required_start", "job_name", "job_code", "id"]:
+        if col in working.columns:
+            sort_cols.append(col)
+            ascending.append(True)
+    working = working.sort_values(sort_cols, ascending=ascending, kind="stable").drop(columns=["_board_order"])
+    return working
+
 def resource_options_df(include_rental: bool = False) -> pd.DataFrame:
     rc = resource_classes_df.copy()
     if not include_rental and "category" in rc.columns:
@@ -243,13 +258,15 @@ def render_jobs_manage_table(df: pd.DataFrame, active_region: str):
 
     for _, row in df.iterrows():
         cols = st.columns(widths)
-        cols[0].write(str(row.get("customer", "") or ""))
-        cols[1].write(str(row["job_name"]))
-        cols[2].write(str(row["job_code"]))
-        cols[3].write(format_date_value(row["mob_start_date"]))
-        cols[4].write(format_date_value(row["job_start_date"]))
-        cols[5].write(format_date_value(row["job_end_date"]))
-        cols[6].write(format_date_value(row["demob_end_date"]))
+        customer_text = str(row.get("customer", "") or "Unassigned")
+        fill = str(row.get("customer_color", "") or "") or customer_base_color(customer_text)
+        render_highlighted_column(cols[0], customer_text, fill, bold=True)
+        render_highlighted_column(cols[1], str(row["job_name"]), fill)
+        render_highlighted_column(cols[2], str(row["job_code"]), fill)
+        render_highlighted_column(cols[3], format_date_value(row["mob_start_date"]), fill, center=True)
+        render_highlighted_column(cols[4], format_date_value(row["job_start_date"]), fill, center=True)
+        render_highlighted_column(cols[5], format_date_value(row["job_end_date"]), fill, center=True)
+        render_highlighted_column(cols[6], format_date_value(row["demob_end_date"]), fill, center=True)
 
         with cols[7].popover("Edit/Delete", use_container_width=True):
             region_idx = region_codes.index(row["region_code"])
@@ -287,208 +304,6 @@ def render_jobs_manage_table(df: pd.DataFrame, active_region: str):
                 st.rerun()
 
 
-
-def open_board_manage_dialog(row: pd.Series, key_prefix: str):
-    st.session_state["board_manage_dialog"] = {
-        "row_id": int(row["id"]),
-        "key_prefix": key_prefix,
-    }
-
-def close_board_manage_dialog():
-    st.session_state.pop("board_manage_dialog", None)
-
-@st.dialog("Manage Board Requirement", width="large")
-def render_board_manage_dialog(dialog_state: dict):
-    row_id = int(dialog_state["row_id"])
-    key_prefix = str(dialog_state["key_prefix"])
-
-    req_df = requirement_summary_df(engine)
-    row_match = req_df.loc[req_df["id"] == row_id]
-    if row_match.empty:
-        st.warning("That requirement row was not found.")
-        if st.button("Close", key=f"{key_prefix}_dialog_close_missing"):
-            close_board_manage_dialog()
-            st.rerun()
-        return
-
-    row = row_match.iloc[0]
-    jobs_lookup = get_jobs_df(engine)
-    job_match = jobs_lookup.loc[jobs_lookup["id"] == int(row["job_id"])]
-    if job_match.empty:
-        st.warning("The related job was not found.")
-        if st.button("Close", key=f"{key_prefix}_dialog_close_missing_job"):
-            close_board_manage_dialog()
-            st.rerun()
-        return
-    job_row = job_match.iloc[0]
-
-    rc_df = resource_options_df()
-    rc_names = rc_df["class_name"].astype(str).tolist()
-    legacy_class = str(row["class_name"])
-    class_options = rc_names.copy()
-    if legacy_class not in class_options:
-        class_options = [legacy_class] + class_options
-    current_idx = class_options.index(legacy_class)
-
-    rental_manage = get_rental_requirements_df(engine)
-    rental_manage = rental_manage[["job_id", "resource_class_id", "quantity_required", "vendor_name"]].copy() if not rental_manage.empty else pd.DataFrame(columns=["job_id", "resource_class_id", "quantity_required", "vendor_name"])
-    if not rental_manage.empty:
-        rental_manage = rental_manage.groupby(["job_id", "resource_class_id"], as_index=False).agg(
-            assigned_rental=("quantity_required", "sum"),
-            rental_vendor=("vendor_name", lambda s: ", ".join(sorted({str(v).strip() for v in s if str(v).strip()}))),
-        )
-
-    manual_manage = get_manual_owned_allocations_df(engine)
-    manual_manage = manual_manage[["job_id", "resource_class_id", "requirement_id", "quantity_assigned"]].copy() if not manual_manage.empty else pd.DataFrame(columns=["job_id", "resource_class_id", "requirement_id", "quantity_assigned"])
-    manual_match_df = build_manual_manage_df(pd.DataFrame([row]), manual_manage)
-
-    assigned_rental = 0.0
-    rental_vendor = ""
-    if not rental_manage.empty:
-        rent_match = rental_manage.loc[
-            (rental_manage["job_id"] == int(row["job_id"]))
-            & (rental_manage["resource_class_id"] == int(row["resource_class_id"]))
-        ]
-        if not rent_match.empty:
-            assigned_rental = float(rent_match["assigned_rental"].iloc[0])
-            rental_vendor = str(rent_match["rental_vendor"].iloc[0] or "")
-
-    manual_assigned_ees = None
-    if not manual_match_df.empty:
-        manual_assigned_ees = manual_match_df["manual_assigned_ees"].iloc[0]
-
-    default_assigned_ees = max(float(row["quantity_required"]) - float(assigned_rental), 0.0)
-    assigned_ees_value = float(default_assigned_ees if pd.isna(manual_assigned_ees) else manual_assigned_ees)
-
-    region_codes = regions_df["region_code"].tolist()
-    region_idx = region_codes.index(job_row["region_code"]) if job_row["region_code"] in region_codes else 0
-
-    st.markdown("##### Job")
-    j1, j2, j3 = st.columns(3)
-    with j1:
-        edit_customer = st.text_input("Customer", value=str(job_row.get("customer", "") or ""), key=f"{key_prefix}_dlg_job_customer_{row_id}")
-        edit_customer_color = st.color_picker("Job Color", value=str(job_row.get("customer_color", "") or "#1f77b4"), key=f"{key_prefix}_dlg_job_color_{row_id}")
-        edit_region = st.selectbox("Region", region_codes, index=region_idx, format_func=region_format, disabled=region_disabled(ACTIVE_REGION), key=f"{key_prefix}_dlg_job_region_{row_id}")
-        edit_location = st.text_input("Location", value=str(job_row.get("location", "") or ""), key=f"{key_prefix}_dlg_job_loc_{row_id}")
-    with j2:
-        edit_job_name = st.text_input("Job Name", value=str(job_row["job_name"]), key=f"{key_prefix}_dlg_job_name_{row_id}")
-        edit_start = st.date_input("Job Start Date", value=pd.to_datetime(job_row["job_start_date"]).date(), key=f"{key_prefix}_dlg_job_start_{row_id}")
-        edit_duration = st.number_input("Job Duration (days)", min_value=1, value=int(job_row["job_duration_days"]), step=1, key=f"{key_prefix}_dlg_job_duration_{row_id}")
-    with j3:
-        edit_mob = st.number_input("Mobilization Days Before Job", min_value=0, value=int(job_row["mob_days_before_job"]), step=1, key=f"{key_prefix}_dlg_job_mob_{row_id}")
-        edit_demob = st.number_input("Demobilization Days After Job", min_value=0, value=int(job_row["demob_days_after_job"]), step=1, key=f"{key_prefix}_dlg_job_demob_{row_id}")
-        statuses = ["Bid", "Awarded", "Planned", "Tentative", "Active", "Billing Pending", "Complete", "Cancelled"]
-        status_index = statuses.index(job_row["status"]) if job_row["status"] in statuses else 0
-        edit_status = st.selectbox("Status", statuses, index=status_index, key=f"{key_prefix}_dlg_job_status_{row_id}")
-    edit_job_notes = st.text_area("Job Notes", value=str(job_row.get("notes", "") or ""), key=f"{key_prefix}_dlg_job_notes_{row_id}")
-
-    st.divider()
-    st.markdown("##### Requirement")
-    edit_class_name = st.selectbox("Resource Class", class_options, index=current_idx, key=f"{key_prefix}_dlg_req_class_{row_id}")
-    edit_rc_match = rc_df.loc[rc_df["class_name"] == edit_class_name]
-    edit_rc_id = int(edit_rc_match.iloc[0]["id"]) if not edit_rc_match.empty else int(row["resource_class_id"])
-    edit_unit_type = str(edit_rc_match.iloc[0]["unit_type"]) if not edit_rc_match.empty else str(row.get("unit_type", "units"))
-    edit_category = str(edit_rc_match.iloc[0]["category"]) if not edit_rc_match.empty else ""
-    step = quantity_step(edit_unit_type, edit_category)
-    fmt = quantity_format(edit_unit_type, edit_category)
-
-    r1, r2, r3 = st.columns(3)
-    with r1:
-        edit_qty = st.number_input("Quantity Required", min_value=0.0, value=float(row["quantity_required"]), step=step, format=fmt, key=f"{key_prefix}_dlg_req_qty_{row_id}")
-        edit_assigned_ees = st.number_input("Assigned EES", min_value=0.0, value=float(assigned_ees_value), step=step, format=fmt, key=f"{key_prefix}_dlg_req_ees_{row_id}")
-        edit_assigned_rental = st.number_input("Assigned Rental", min_value=0.0, value=float(assigned_rental), step=step, format=fmt, key=f"{key_prefix}_dlg_req_rental_{row_id}")
-    with r2:
-        edit_vendor = st.text_input("Rental Vendor", value=rental_vendor, key=f"{key_prefix}_dlg_req_vendor_{row_id}")
-        priorities = ["Low", "Normal", "High", "Critical"]
-        p_index = priorities.index(row["priority"]) if row["priority"] in priorities else 1
-        edit_priority = st.selectbox("Priority", priorities, index=p_index, key=f"{key_prefix}_dlg_req_priority_{row_id}")
-    with r3:
-        edit_before = st.number_input("Days Before Job Start", min_value=0, value=int(row["days_before_job_start"]), step=1, key=f"{key_prefix}_dlg_req_before_{row_id}")
-        edit_after = st.number_input("Days After Job End", min_value=0, value=int(row["days_after_job_end"]), step=1, key=f"{key_prefix}_dlg_req_after_{row_id}")
-    edit_req_notes = st.text_area("Requirement Notes", value=str(row.get("notes", "") or ""), key=f"{key_prefix}_dlg_req_notes_{row_id}")
-
-    btn1, btn2, btn3, btn4 = st.columns([1.2, 1.2, 1.2, 0.8])
-
-    if btn1.button("Save Changes", key=f"{key_prefix}_dlg_save_{row_id}", type="primary"):
-        capped_assigned_ees = min(float(edit_assigned_ees), float(edit_qty))
-        update_job(engine, int(job_row["id"]), {
-            "job_name": edit_job_name,
-            "region_code": active_region_value(ACTIVE_REGION, edit_region),
-            "customer": edit_customer,
-            "customer_color": edit_customer_color,
-            "location": edit_location,
-            "job_start_date": edit_start,
-            "job_duration_days": int(edit_duration),
-            "mob_days_before_job": int(edit_mob),
-            "demob_days_after_job": int(edit_demob),
-            "status": edit_status,
-            "notes": edit_job_notes,
-        })
-        update_requirement(engine, int(row["id"]), {
-            "resource_class_id": edit_rc_id,
-            "quantity_required": float(edit_qty),
-            "days_before_job_start": int(edit_before),
-            "days_after_job_end": int(edit_after),
-            "priority": edit_priority,
-            "notes": edit_req_notes,
-        })
-        upsert_manual_owned_allocation_for_job_class(
-            engine,
-            int(row["job_id"]),
-            int(edit_rc_id),
-            capped_assigned_ees,
-            int(edit_before),
-            int(edit_after),
-            edit_req_notes,
-            requirement_id=int(row["id"]),
-        )
-        upsert_rental_requirement_for_job_class(
-            engine,
-            int(row["job_id"]),
-            int(edit_rc_id),
-            float(edit_assigned_rental),
-            int(edit_before),
-            int(edit_after),
-            edit_vendor,
-            edit_req_notes,
-        )
-        close_board_manage_dialog()
-        st.rerun()
-
-    if btn2.button("Delete Requirement", key=f"{key_prefix}_dlg_delete_req_btn_{row_id}"):
-        st.session_state[f"{key_prefix}_confirm_delete_req_{row_id}"] = True
-
-    if btn3.button("Delete Job", key=f"{key_prefix}_dlg_delete_job_btn_{row_id}"):
-        st.session_state[f"{key_prefix}_confirm_delete_job_{row_id}"] = True
-
-    if btn4.button("Close", key=f"{key_prefix}_dlg_close_{row_id}"):
-        close_board_manage_dialog()
-        st.rerun()
-
-    if st.session_state.get(f"{key_prefix}_confirm_delete_req_{row_id}", False):
-        st.warning("Delete this requirement row?")
-        c1, c2 = st.columns(2)
-        if c1.button("Confirm Delete Requirement", key=f"{key_prefix}_dlg_confirm_req_{row_id}"):
-            st.session_state.pop(f"{key_prefix}_confirm_delete_req_{row_id}", None)
-            delete_requirement(engine, int(row["id"]))
-            close_board_manage_dialog()
-            st.rerun()
-        if c2.button("Cancel", key=f"{key_prefix}_dlg_cancel_req_{row_id}"):
-            st.session_state.pop(f"{key_prefix}_confirm_delete_req_{row_id}", None)
-            st.rerun()
-
-    if st.session_state.get(f"{key_prefix}_confirm_delete_job_{row_id}", False):
-        st.error("Delete the entire job and its related records?")
-        c1, c2 = st.columns(2)
-        if c1.button("Confirm Delete Job", key=f"{key_prefix}_dlg_confirm_job_{row_id}"):
-            st.session_state.pop(f"{key_prefix}_confirm_delete_job_{row_id}", None)
-            delete_job(engine, int(job_row["id"]))
-            close_board_manage_dialog()
-            st.rerun()
-        if c2.button("Cancel", key=f"{key_prefix}_dlg_cancel_job_{row_id}"):
-            st.session_state.pop(f"{key_prefix}_confirm_delete_job_{row_id}", None)
-            st.rerun()
-
 def render_requirements_manage_table(df: pd.DataFrame, key_prefix: str = 'req', highlight_by_job: bool = False):
     st.markdown("##### Manage Requirements")
     if df.empty:
@@ -504,13 +319,13 @@ def render_requirements_manage_table(df: pd.DataFrame, key_prefix: str = 'req', 
 
     rc_df = resource_options_df()
     rc_names = rc_df["class_name"].astype(str).tolist()
+    df = sort_requirements_by_class_order(df)
 
     for _, row in df.iterrows():
         cols = st.columns(widths)
         customer_text = str(row.get("customer", "") or "Unassigned")
         job_name_text = str(row.get("job_name", "") or "")
         fill = str(row.get("customer_color", "") or "") or customer_base_color(customer_text)
-
         if highlight_by_job:
             render_highlighted_column(cols[0], customer_text, fill, bold=True)
             render_highlighted_column(cols[1], job_name_text, fill)
@@ -532,130 +347,122 @@ def render_requirements_manage_table(df: pd.DataFrame, key_prefix: str = 'req', 
             cols[7].write(str(row.get("allocation_status", "")))
             cols[8].write(str(row.get("notes", "") or ""))
 
-        if key_prefix.startswith("boardreq_"):
-            if cols[9].button("Edit/Delete", key=f"{key_prefix}_open_dialog_{row['id']}", use_container_width=True):
-                open_board_manage_dialog(row, key_prefix)
+        with cols[9].popover("Edit/Delete", use_container_width=True):
+            legacy_class = str(row["class_name"])
+            class_options = rc_names.copy()
+            if legacy_class not in class_options:
+                class_options = [legacy_class] + class_options
+            current_idx = class_options.index(legacy_class)
+
+            edit_class_name = st.selectbox(
+                "Resource Class",
+                class_options,
+                index=current_idx,
+                key=f"{key_prefix}_class_{row['id']}",
+            )
+            edit_rc_match = rc_df.loc[rc_df["class_name"] == edit_class_name]
+            edit_rc_id = int(edit_rc_match.iloc[0]["id"]) if not edit_rc_match.empty else int(row["resource_class_id"])
+            edit_unit_type = str(edit_rc_match.iloc[0]["unit_type"]) if not edit_rc_match.empty else str(row.get("unit_type", "units"))
+            edit_category = str(edit_rc_match.iloc[0]["category"]) if not edit_rc_match.empty else ""
+            step = quantity_step(edit_unit_type, edit_category)
+            fmt = quantity_format(edit_unit_type, edit_category)
+
+            edit_qty = st.number_input(
+                "Quantity Required",
+                min_value=0.0,
+                value=float(row["quantity_required"]),
+                step=step,
+                format=fmt,
+                key=f"{key_prefix}_qty_{row['id']}",
+            )
+            edit_assigned_ees = st.number_input(
+                "Assigned EES",
+                min_value=0.0,
+                value=float(row.get("assigned_ees", 0.0)),
+                step=step,
+                format=fmt,
+                key=f"{key_prefix}_assigned_ees_{row['id']}",
+            )
+            edit_assigned_rental = st.number_input(
+                "Assigned Rental",
+                min_value=0.0,
+                value=float(row.get("assigned_rental", 0.0)),
+                step=step,
+                format=fmt,
+                key=f"{key_prefix}_assigned_rental_{row['id']}",
+            )
+            edit_vendor = st.text_input(
+                "Rental Vendor",
+                value=str(row.get("rental_vendor", "") or ""),
+                key=f"{key_prefix}_vendor_{row['id']}",
+            )
+            priorities = ["Low", "Normal", "High", "Critical"]
+            p_index = priorities.index(row["priority"]) if row["priority"] in priorities else 1
+            edit_priority = st.selectbox(
+                "Priority",
+                priorities,
+                index=p_index,
+                key=f"{key_prefix}_priority_{row['id']}",
+            )
+            edit_before = st.number_input(
+                "Days Before Job Start",
+                min_value=0,
+                value=int(row["days_before_job_start"]),
+                step=1,
+                key=f"{key_prefix}_before_{row['id']}",
+            )
+            edit_after = st.number_input(
+                "Days After Job End",
+                min_value=0,
+                value=int(row["days_after_job_end"]),
+                step=1,
+                key=f"{key_prefix}_after_{row['id']}",
+            )
+            edit_notes = st.text_area(
+                "Notes",
+                value=str(row.get("notes", "") or ""),
+                key=f"{key_prefix}_notes_{row['id']}",
+            )
+            a, b = st.columns(2)
+            if a.button("Save", key=f"{key_prefix}_save_{row['id']}"):
+                capped_assigned_ees = min(float(edit_assigned_ees), float(edit_qty))
+                update_requirement(
+                    engine,
+                    int(row["id"]),
+                    {
+                        "resource_class_id": edit_rc_id,
+                        "quantity_required": float(edit_qty),
+                        "days_before_job_start": int(edit_before),
+                        "days_after_job_end": int(edit_after),
+                        "priority": edit_priority,
+                        "notes": edit_notes,
+                    },
+                )
+                upsert_manual_owned_allocation_for_job_class(
+                    engine,
+                    int(row["job_id"]),
+                    int(edit_rc_id),
+                    capped_assigned_ees,
+                    int(edit_before),
+                    int(edit_after),
+                    edit_notes,
+                    requirement_id=int(row["id"]),
+                )
+                upsert_rental_requirement_for_job_class(
+                    engine,
+                    int(row["job_id"]),
+                    int(edit_rc_id),
+                    float(edit_assigned_rental),
+                    int(edit_before),
+                    int(edit_after),
+                    edit_vendor,
+                    edit_notes,
+                )
                 st.rerun()
-        else:
-            with cols[9].popover("Edit/Delete", use_container_width=True):
-                legacy_class = str(row["class_name"])
-                class_options = rc_names.copy()
-                if legacy_class not in class_options:
-                    class_options = [legacy_class] + class_options
-                current_idx = class_options.index(legacy_class)
+            if b.button("Delete", key=f"{key_prefix}_delete_{row['id']}"):
+                delete_requirement(engine, int(row["id"]))
+                st.rerun()
 
-                edit_class_name = st.selectbox(
-                    "Resource Class",
-                    class_options,
-                    index=current_idx,
-                    key=f"{key_prefix}_class_{row['id']}",
-                )
-                edit_rc_match = rc_df.loc[rc_df["class_name"] == edit_class_name]
-                edit_rc_id = int(edit_rc_match.iloc[0]["id"]) if not edit_rc_match.empty else int(row["resource_class_id"])
-                edit_unit_type = str(edit_rc_match.iloc[0]["unit_type"]) if not edit_rc_match.empty else str(row.get("unit_type", "units"))
-                edit_category = str(edit_rc_match.iloc[0]["category"]) if not edit_rc_match.empty else ""
-                step = quantity_step(edit_unit_type, edit_category)
-                fmt = quantity_format(edit_unit_type, edit_category)
-
-                edit_qty = st.number_input(
-                    "Quantity Required",
-                    min_value=0.0,
-                    value=float(row["quantity_required"]),
-                    step=step,
-                    format=fmt,
-                    key=f"{key_prefix}_qty_{row['id']}",
-                )
-                edit_assigned_ees = st.number_input(
-                    "Assigned EES",
-                    min_value=0.0,
-                    value=float(row.get("assigned_ees", 0.0)),
-                    step=step,
-                    format=fmt,
-                    key=f"{key_prefix}_assigned_ees_{row['id']}",
-                )
-                edit_assigned_rental = st.number_input(
-                    "Assigned Rental",
-                    min_value=0.0,
-                    value=float(row.get("assigned_rental", 0.0)),
-                    step=step,
-                    format=fmt,
-                    key=f"{key_prefix}_assigned_rental_{row['id']}",
-                )
-                edit_vendor = st.text_input(
-                    "Rental Vendor",
-                    value=str(row.get("rental_vendor", "") or ""),
-                    key=f"{key_prefix}_vendor_{row['id']}",
-                )
-                priorities = ["Low", "Normal", "High", "Critical"]
-                p_index = priorities.index(row["priority"]) if row["priority"] in priorities else 1
-                edit_priority = st.selectbox(
-                    "Priority",
-                    priorities,
-                    index=p_index,
-                    key=f"{key_prefix}_priority_{row['id']}",
-                )
-                edit_before = st.number_input(
-                    "Days Before Job Start",
-                    min_value=0,
-                    value=int(row["days_before_job_start"]),
-                    step=1,
-                    key=f"{key_prefix}_before_{row['id']}",
-                )
-                edit_after = st.number_input(
-                    "Days After Job End",
-                    min_value=0,
-                    value=int(row["days_after_job_end"]),
-                    step=1,
-                    key=f"{key_prefix}_after_{row['id']}",
-                )
-                edit_notes = st.text_area(
-                    "Notes",
-                    value=str(row.get("notes", "") or ""),
-                    key=f"{key_prefix}_notes_{row['id']}",
-                )
-                a, b = st.columns(2)
-                if a.button("Save", key=f"{key_prefix}_save_{row['id']}"):
-                    capped_assigned_ees = min(float(edit_assigned_ees), float(edit_qty))
-                    update_requirement(
-                        engine,
-                        int(row["id"]),
-                        {
-                            "resource_class_id": edit_rc_id,
-                            "quantity_required": float(edit_qty),
-                            "days_before_job_start": int(edit_before),
-                            "days_after_job_end": int(edit_after),
-                            "priority": edit_priority,
-                            "notes": edit_notes,
-                        },
-                    )
-                    upsert_manual_owned_allocation_for_job_class(
-                        engine,
-                        int(row["job_id"]),
-                        int(edit_rc_id),
-                        capped_assigned_ees,
-                        int(edit_before),
-                        int(edit_after),
-                        edit_notes,
-                        requirement_id=int(row["id"]),
-                    )
-                    upsert_rental_requirement_for_job_class(
-                        engine,
-                        int(row["job_id"]),
-                        int(edit_rc_id),
-                        float(edit_assigned_rental),
-                        int(edit_before),
-                        int(edit_after),
-                        edit_vendor,
-                        edit_notes,
-                    )
-                    st.rerun()
-                if b.button("Delete", key=f"{key_prefix}_delete_{row['id']}"):
-                    delete_requirement(engine, int(row["id"]))
-                    st.rerun()
-
-    dialog_state = st.session_state.get("board_manage_dialog")
-    if dialog_state and str(dialog_state.get("key_prefix")) == key_prefix and key_prefix.startswith("boardreq_"):
-        render_board_manage_dialog(dialog_state)
 
 def render_pools_manage_table(df: pd.DataFrame, active_region: str):
     st.markdown("##### Manage Pools")
@@ -770,6 +577,42 @@ def hex_to_rgba(hex_color: str, alpha: float) -> str:
     b = int(hex_color[4:6], 16)
     a = max(0.0, min(1.0, float(alpha)))
     return f"rgba({r}, {g}, {b}, {a})"
+
+
+def highlight_cell_html(text, fill: str, bold: bool = False, center: bool = False) -> str:
+    pill_bg = hex_to_rgba(fill, 0.18)
+    pill_border = hex_to_rgba(fill, 0.55)
+    weight = 700 if bold else 400
+    align = "center" if center else "left"
+    return (
+        f"<div style='background:{pill_bg}; border-left:4px solid {fill}; border-radius:8px; "
+        f"padding:6px 8px; font-weight:{weight}; text-align:{align}; min-height:38px; display:flex; align-items:center;'>"
+        f"{text}</div>"
+    )
+
+
+def render_highlighted_column(col, text, fill: str, bold: bool = False, center: bool = False):
+    col.markdown(highlight_cell_html(text, fill, bold=bold, center=center), unsafe_allow_html=True)
+
+
+def class_order_map() -> dict[str, int]:
+    return {name: idx for idx, name in enumerate(resource_options_df()["class_name"].astype(str).tolist())}
+
+
+def sort_requirements_by_class_order(df: pd.DataFrame) -> pd.DataFrame:
+    if df.empty or "class_name" not in df.columns:
+        return df
+    working = df.copy()
+    order_map = class_order_map()
+    working["_class_order"] = working["class_name"].astype(str).map(order_map).fillna(10_000)
+    sort_cols = ["_class_order"]
+    ascending = [True]
+    for col in ["required_start", "job_name", "job_code", "id"]:
+        if col in working.columns:
+            sort_cols.append(col)
+            ascending.append(True)
+    working = working.sort_values(sort_cols, ascending=ascending, kind="stable").drop(columns=["_class_order"])
+    return working
 def week_start_label(ts: pd.Timestamp) -> str:
     week_end = ts + pd.Timedelta(days=6)
     if ts.month == week_end.month:
@@ -1202,7 +1045,7 @@ def render_planning_board(active_region: str, include_excluded: bool = False, se
         range=[0.5, total_rows + 0.5],
         showgrid=False,
         zeroline=False,
-        tickfont=dict(size=12),
+        tickfont=dict(size=14),
         fixedrange=True,
     )
     fig.update_layout(
@@ -1215,6 +1058,9 @@ def render_planning_board(active_region: str, include_excluded: bool = False, se
         fig,
         width="stretch",
         config={
+            "staticPlot": True,
+            "scrollZoom": False,
+            "doubleClick": False,
             "displayModeBar": True,
             "displaylogo": False,
             "modeBarButtons": [["toImage"]],
@@ -1227,6 +1073,48 @@ def render_planning_board(active_region: str, include_excluded: bool = False, se
             },
         },
     )
+
+    st.markdown("##### Manage Requirements Shown on Board")
+    req_manage = filter_by_job_status(region_filter(requirement_summary_df(engine), active_region), include_excluded=include_excluded)
+    req_manage = req_manage.loc[req_manage["class_name"] == selected_class].copy() if not req_manage.empty else pd.DataFrame()
+    if req_manage.empty:
+        st.info("No requirement rows shown on this board.")
+    else:
+        board_job_codes = board_df["job_code"].astype(str).tolist()
+        req_manage = req_manage.loc[req_manage["job_code"].astype(str).isin(board_job_codes)].copy()
+
+        rental_manage = filter_by_job_status(region_filter(get_rental_requirements_df(engine), active_region), include_excluded=include_excluded)
+        rental_manage = rental_manage.loc[rental_manage["class_name"] == selected_class].copy() if not rental_manage.empty else pd.DataFrame()
+        rental_manage = rental_manage[["job_id", "resource_class_id", "quantity_required", "vendor_name"]].copy() if not rental_manage.empty else pd.DataFrame(columns=["job_id", "resource_class_id", "quantity_required", "vendor_name"])
+        if not rental_manage.empty:
+            rental_manage = rental_manage.groupby(["job_id", "resource_class_id"], as_index=False).agg(
+                assigned_rental=("quantity_required", "sum"),
+                rental_vendor=("vendor_name", lambda s: ", ".join(sorted({str(v).strip() for v in s if str(v).strip()}))),
+            )
+
+        manual_manage = filter_by_job_status(region_filter(get_manual_owned_allocations_df(engine), active_region), include_excluded=include_excluded)
+        manual_manage = manual_manage.loc[manual_manage["class_name"] == selected_class].copy() if not manual_manage.empty else pd.DataFrame()
+
+        manage_df = req_manage.copy()
+        manage_df = manage_df.merge(rental_manage, on=["job_id", "resource_class_id"], how="left")
+        manual_manage_df = build_manual_manage_df(manage_df, manual_manage)
+        manage_df = manage_df.merge(manual_manage_df, on="id", how="left")
+        if "quantity_required" not in manage_df.columns:
+            manage_df["quantity_required"] = 0.0
+        if "assigned_rental" not in manage_df.columns:
+            manage_df["assigned_rental"] = 0.0
+        if "manual_assigned_ees" not in manage_df.columns:
+            manage_df["manual_assigned_ees"] = None
+        if "rental_vendor" not in manage_df.columns:
+            manage_df["rental_vendor"] = ""
+        manage_df["quantity_required"] = pd.to_numeric(manage_df["quantity_required"], errors="coerce").fillna(0.0)
+        manage_df["assigned_rental"] = pd.to_numeric(manage_df["assigned_rental"], errors="coerce").fillna(0.0)
+        manage_df["assigned_ees"] = pd.to_numeric(manage_df["manual_assigned_ees"], errors="coerce").fillna(
+            (manage_df["quantity_required"] - manage_df["assigned_rental"]).clip(lower=0)
+        )
+        manage_df["rental_vendor"] = manage_df["rental_vendor"].fillna("")
+        manage_df = sort_requirements_like_board(manage_df, board_df)
+        render_requirements_manage_table(manage_df, key_prefix="boardreq_pipeline" if include_excluded else "boardreq_active", highlight_by_job=True)
 
 with st.sidebar:
     st.header("Workspace")
@@ -1336,6 +1224,8 @@ with tab_jobs:
             st.rerun()
 
     jobs_df = filter_active_jobs_for_management(region_filter(get_jobs_df(engine), ACTIVE_REGION))
+    if not jobs_df.empty and "job_start_date" in jobs_df.columns:
+        jobs_df = jobs_df.sort_values(["job_start_date", "mob_start_date", "job_name", "job_code"], ascending=[True, True, True, True]).reset_index(drop=True)
     render_jobs_manage_table(jobs_df, ACTIVE_REGION)
 
 
@@ -1368,6 +1258,16 @@ with tab_job_requirements:
             key=job_req_select_key,
         )
         selected_job = job_options.loc[job_options["id"] == selected_job_id].iloc[0]
+
+        selected_fill = str(selected_job.get("customer_color", "") or "") or customer_base_color(str(selected_job.get("customer", "Unassigned") or "Unassigned"))
+        st.markdown(
+            highlight_cell_html(
+                f"Selected: {str(selected_job.get('customer', '') or 'Unassigned')} | {selected_job['job_name']} | {selected_job['job_code']}",
+                selected_fill,
+                bold=True,
+            ),
+            unsafe_allow_html=True,
+        )
 
         st.markdown(
             f'''
@@ -1521,6 +1421,7 @@ with tab_job_requirements:
         if selected_job_reqs.empty:
             st.info("No owned requirements yet for this job.")
         else:
+            selected_job_reqs = sort_requirements_by_class_order(selected_job_reqs)
             display_req = selected_job_reqs[["class_name", "quantity_required", "required_start", "required_end", "notes"]].copy()
             display_req["quantity_required"] = display_req["quantity_required"].map(format_compact_number)
             display_req["notes"] = display_req["notes"].fillna("")
@@ -1550,6 +1451,7 @@ with tab_job_requirements:
         if selected_job_rentals.empty:
             st.info("No rental requirements yet for this job.")
         else:
+            selected_job_rentals = sort_requirements_by_class_order(selected_job_rentals)
             display_rent = selected_job_rentals[["class_name", "quantity_required", "vendor_name", "required_start", "required_end"]].copy()
             display_rent["quantity_required"] = display_rent["quantity_required"].map(format_compact_number)
             display_rent = format_dates_for_display(display_rent)
@@ -1657,6 +1559,7 @@ with tab_requirements:
     if req_summary.empty:
         st.info("No requirements yet.")
     else:
+        req_summary = sort_requirements_by_class_order(req_summary)
         display_req = format_dates_for_display(req_summary[["job_code","job_name","region_code","class_name","quantity_required","unit_type","required_start","required_end","quantity_assigned","quantity_shortfall","allocation_status"]])
         display_req["region_code"] = display_req["region_code"].map(lambda x: region_format(str(x)))
         st.dataframe(display_req, width="stretch")
@@ -1676,6 +1579,7 @@ with tab_requirements:
         manage_df["assigned_rental"] = manage_df["assigned_rental"].fillna(0.0)
         manage_df["assigned_ees"] = manage_df["manual_assigned_ees"].fillna((manage_df["quantity_required"].astype(float) - manage_df["assigned_rental"].astype(float)).clip(lower=0))
         manage_df["rental_vendor"] = manage_df["rental_vendor"].fillna("")
+        manage_df = sort_requirements_by_class_order(manage_df)
         render_requirements_manage_table(manage_df)
 
 with tab_planning:
@@ -1790,6 +1694,7 @@ with tab_allocations:
     if active_req_summary.empty:
         st.info("No active requirements yet.")
     else:
+        active_req_summary = sort_requirements_by_class_order(active_req_summary)
         display_req = format_dates_for_display(active_req_summary[["job_code","job_name","region_code","class_name","quantity_required","quantity_assigned","quantity_shortfall","allocation_status"]])
         display_req["region_code"] = display_req["region_code"].map(lambda x: region_format(str(x)))
         st.dataframe(display_req, width="stretch")
@@ -1817,6 +1722,7 @@ with tab_allocations:
         st.info("No Bid / Awarded requirements yet.")
     else:
         st.markdown("##### Bid / Awarded Requirement Rows")
+        pipeline_req_summary = sort_requirements_by_class_order(pipeline_req_summary)
         display_pipeline_req = format_dates_for_display(pipeline_req_summary[["job_code","job_name","status","region_code","class_name","quantity_required","quantity_assigned","quantity_shortfall","allocation_status"]])
         display_pipeline_req["region_code"] = display_pipeline_req["region_code"].map(lambda x: region_format(str(x)))
         st.dataframe(display_pipeline_req, width="stretch")
