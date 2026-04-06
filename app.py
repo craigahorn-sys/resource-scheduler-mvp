@@ -240,6 +240,141 @@ def resource_options_df(include_rental: bool = False) -> pd.DataFrame:
     rc["display"] = rc.apply(display_class_name, axis=1)
     return rc
 
+@st.dialog("Edit Job & Requirement", width="large")
+def _board_row_edit_dialog(req_row: pd.Series, job_row: pd.Series, active_region: str, key_prefix: str):
+    """Combined job + requirement editor used on the planning board."""
+    fill = str(req_row.get("customer_color", "") or "") or customer_base_color(str(req_row.get("customer", "Unassigned") or "Unassigned"))
+    st.markdown(
+        highlight_cell_html(
+            f"{str(req_row.get('customer', '') or 'Unassigned')} | {req_row['job_name']} | {req_row['job_code']} — {req_row['class_name']}",
+            fill, bold=True,
+        ),
+        unsafe_allow_html=True,
+    )
+
+    tab_job, tab_req = st.tabs(["✏️ Job", "📋 Requirement"])
+
+    # ── Job tab ──────────────────────────────────────────────────────────────
+    with tab_job:
+        region_codes = regions_df["region_code"].tolist()
+        region_idx = region_codes.index(job_row["region_code"]) if job_row["region_code"] in region_codes else 0
+        statuses = ["Bid", "Awarded", "Planned", "Tentative", "Active", "Billing Pending", "Complete", "Cancelled"]
+
+        c1, c2 = st.columns(2)
+        edit_customer = c1.text_input("Customer", value=str(job_row.get("customer", "") or ""))
+        edit_customer_color = c2.color_picker("Job Color", value=str(job_row.get("customer_color", "") or "#1f77b4"))
+
+        c3, c4 = st.columns(2)
+        edit_job_name = c3.text_input("Job Name", value=str(job_row["job_name"]))
+        edit_region = c4.selectbox("Region", region_codes, index=region_idx, format_func=region_format, disabled=region_disabled(active_region))
+
+        c5, c6 = st.columns(2)
+        edit_location = c5.text_input("Location", value=str(job_row.get("location", "") or ""))
+        status_index = statuses.index(job_row["status"]) if job_row["status"] in statuses else 0
+        edit_status = c6.selectbox("Status", statuses, index=status_index)
+
+        c7, c8, c9 = st.columns(3)
+        edit_start = c7.date_input("Job Start Date", value=pd.to_datetime(job_row["job_start_date"]).date(), key=f"{key_prefix}_dlg_job_start")
+        c7.caption(f"Selected: {edit_start.strftime('%m/%d/%Y')}")
+        edit_duration = c8.number_input("Duration (days)", min_value=1, value=int(job_row["job_duration_days"]), step=1)
+        edit_mob = c9.number_input("Mob Days Before", min_value=0, value=int(job_row["mob_days_before_job"]), step=1)
+
+        c10, _ = st.columns(2)
+        edit_demob = c10.number_input("Demob Days After", min_value=0, value=int(job_row["demob_days_after_job"]), step=1)
+
+        preview = calc_job_dates(edit_start, int(edit_duration), int(edit_mob), int(edit_demob))
+        st.info(
+            f"Mob Start: {format_date_value(preview['mob_start_date'])}  |  "
+            f"Job End: {format_date_value(preview['job_end_date'])}  |  "
+            f"Demob End: {format_date_value(preview['demob_end_date'])}"
+        )
+        edit_job_notes = st.text_area("Job Notes", value=str(job_row.get("notes", "") or ""))
+
+        st.divider()
+        confirm_delete = st.checkbox("✔ Confirm delete job — this cannot be undone (also deletes all requirements)")
+        col_save, col_delete = st.columns(2)
+        if col_save.button("💾 Save Job", type="primary", use_container_width=True, key=f"{key_prefix}_dlg_save_job"):
+            update_job(engine, int(job_row["id"]), {
+                "job_name": edit_job_name,
+                "region_code": active_region_value(active_region, edit_region),
+                "customer": edit_customer,
+                "customer_color": edit_customer_color,
+                "location": edit_location,
+                "job_start_date": edit_start,
+                "job_duration_days": int(edit_duration),
+                "mob_days_before_job": int(edit_mob),
+                "demob_days_after_job": int(edit_demob),
+                "status": edit_status,
+                "notes": edit_job_notes,
+            })
+            st.rerun()
+        if col_delete.button("🗑 Delete Job", type="secondary", use_container_width=True, disabled=not confirm_delete, key=f"{key_prefix}_dlg_delete_job"):
+            delete_job(engine, int(job_row["id"]))
+            st.rerun()
+        if not confirm_delete:
+            st.caption("Check the box above to enable job deletion.")
+
+    # ── Requirement tab ───────────────────────────────────────────────────────
+    with tab_req:
+        rc_df = resource_options_df()
+        rc_names = rc_df["class_name"].astype(str).tolist()
+        legacy_class = str(req_row["class_name"])
+        class_options = rc_names.copy()
+        if legacy_class not in class_options:
+            class_options = [legacy_class] + class_options
+        current_idx = class_options.index(legacy_class)
+
+        edit_class_name = st.selectbox("Resource Class", class_options, index=current_idx, key=f"{key_prefix}_dlg_class")
+        edit_rc_match = rc_df.loc[rc_df["class_name"] == edit_class_name]
+        edit_rc_id = int(edit_rc_match.iloc[0]["id"]) if not edit_rc_match.empty else int(req_row["resource_class_id"])
+        edit_unit_type = str(edit_rc_match.iloc[0]["unit_type"]) if not edit_rc_match.empty else str(req_row.get("unit_type", "units"))
+        edit_category = str(edit_rc_match.iloc[0]["category"]) if not edit_rc_match.empty else ""
+        step = quantity_step(edit_unit_type, edit_category)
+        fmt = quantity_format(edit_unit_type, edit_category)
+
+        c1, c2, c3 = st.columns(3)
+        edit_qty = c1.number_input("Quantity Required", min_value=0.0, value=float(req_row["quantity_required"]), step=step, format=fmt, key=f"{key_prefix}_dlg_qty")
+        edit_assigned_ees = c2.number_input("Assigned EES", min_value=0.0, value=float(req_row.get("assigned_ees", 0.0)), step=step, format=fmt, key=f"{key_prefix}_dlg_ees")
+        edit_assigned_rental = c3.number_input("Assigned Rental", min_value=0.0, value=float(req_row.get("assigned_rental", 0.0)), step=step, format=fmt, key=f"{key_prefix}_dlg_rental")
+
+        c4, c5 = st.columns(2)
+        edit_vendor = c4.text_input("Rental Vendor", value=str(req_row.get("rental_vendor", "") or ""), key=f"{key_prefix}_dlg_vendor")
+        priorities = ["Low", "Normal", "High", "Critical"]
+        p_index = priorities.index(req_row["priority"]) if req_row.get("priority") in priorities else 1
+        edit_priority = c5.selectbox("Priority", priorities, index=p_index, key=f"{key_prefix}_dlg_priority")
+
+        c6, c7 = st.columns(2)
+        edit_before = c6.number_input("Days Before Job Start", min_value=0, value=int(req_row["days_before_job_start"]), step=1, key=f"{key_prefix}_dlg_before")
+        edit_after = c7.number_input("Days After Job End", min_value=0, value=int(req_row["days_after_job_end"]), step=1, key=f"{key_prefix}_dlg_after")
+
+        edit_req_notes = st.text_area("Requirement Notes", value=str(req_row.get("notes", "") or ""), key=f"{key_prefix}_dlg_req_notes")
+
+        st.divider()
+        col_save_req, col_del_req = st.columns(2)
+        if col_save_req.button("💾 Save Requirement", type="primary", use_container_width=True, key=f"{key_prefix}_dlg_save_req"):
+            capped_ees = min(float(edit_assigned_ees), float(edit_qty))
+            update_requirement(engine, int(req_row["id"]), {
+                "resource_class_id": edit_rc_id,
+                "quantity_required": float(edit_qty),
+                "days_before_job_start": int(edit_before),
+                "days_after_job_end": int(edit_after),
+                "priority": edit_priority,
+                "notes": edit_req_notes,
+            })
+            upsert_manual_owned_allocation_for_job_class(
+                engine, int(req_row["job_id"]), int(edit_rc_id), capped_ees,
+                int(edit_before), int(edit_after), edit_req_notes, requirement_id=int(req_row["id"]),
+            )
+            upsert_rental_requirement_for_job_class(
+                engine, int(req_row["job_id"]), int(edit_rc_id),
+                float(edit_assigned_rental), int(edit_before), int(edit_after), edit_vendor, edit_req_notes,
+            )
+            st.rerun()
+        if col_del_req.button("🗑 Delete Requirement", type="secondary", use_container_width=True, key=f"{key_prefix}_dlg_del_req"):
+            delete_requirement(engine, int(req_row["id"]))
+            st.rerun()
+
+
 @st.dialog("Edit Job", width="large")
 def _job_edit_dialog(row: pd.Series, active_region: str):
     region_codes = regions_df["region_code"].tolist()
@@ -348,53 +483,6 @@ def render_jobs_manage_table(df: pd.DataFrame, active_region: str):
     if dialog_key in st.session_state:
         open_id, open_region = st.session_state[dialog_key]
         match = df.loc[df["id"] == open_id]
-        if not match.empty:
-            _job_edit_dialog(match.iloc[0], open_region)
-
-
-def render_board_jobs_manage_table(board_df: pd.DataFrame, active_region: str):
-    """Renders a full job edit/delete table for jobs visible on the planning board."""
-    st.markdown("##### Manage Jobs Shown on Board")
-    if board_df.empty:
-        return
-
-    all_jobs = filter_active_jobs_for_management(region_filter(get_jobs_df(engine), active_region))
-    board_codes = board_df["job_code"].astype(str).unique().tolist()
-    board_jobs = all_jobs.loc[all_jobs["job_code"].astype(str).isin(board_codes)].copy() if not all_jobs.empty else pd.DataFrame()
-
-    if board_jobs.empty:
-        st.info("No editable jobs found for this board view.")
-        return
-
-    if "job_start_date" in board_jobs.columns:
-        board_jobs = board_jobs.sort_values(["job_start_date", "job_name"], ascending=True).reset_index(drop=True)
-
-    widths = [1.3, 1.5, 1.0, 1.0, 1.0, 1.0, 1.0, 0.8]
-    headers = ["Customer", "Job Name", "Job Code", "Mob Start", "Job Start", "Job End", "Demob End", "Manage"]
-    hdr = st.columns(widths)
-    for c, h in zip(hdr, headers):
-        c.markdown(f"**{h}**")
-
-    dialog_key = "board_jobs_open_job_id"
-
-    for _, row in board_jobs.iterrows():
-        cols = st.columns(widths)
-        customer_text = str(row.get("customer", "") or "Unassigned")
-        fill = str(row.get("customer_color", "") or "") or customer_base_color(customer_text)
-        render_highlighted_column(cols[0], customer_text, fill, bold=True)
-        render_highlighted_column(cols[1], str(row["job_name"]), fill)
-        render_highlighted_column(cols[2], str(row["job_code"]), fill)
-        render_highlighted_column(cols[3], format_date_value(row["mob_start_date"]), fill, center=True)
-        render_highlighted_column(cols[4], format_date_value(row["job_start_date"]), fill, center=True)
-        render_highlighted_column(cols[5], format_date_value(row["job_end_date"]), fill, center=True)
-        render_highlighted_column(cols[6], format_date_value(row["demob_end_date"]), fill, center=True)
-
-        if cols[7].button("Edit / Delete", key=f"open_board_job_dialog_{row['id']}", use_container_width=True):
-            st.session_state[dialog_key] = (int(row["id"]), active_region)
-
-    if dialog_key in st.session_state:
-        open_id, open_region = st.session_state[dialog_key]
-        match = board_jobs.loc[board_jobs["id"] == open_id]
         if not match.empty:
             _job_edit_dialog(match.iloc[0], open_region)
 
@@ -1169,9 +1257,12 @@ def render_planning_board(active_region: str, include_excluded: bool = False, se
         },
     )
 
-    st.markdown("##### Manage Requirements Shown on Board")
+    # ── Merged board manage table ─────────────────────────────────────────────
+    st.markdown("##### Manage Jobs & Requirements Shown on Board")
+    key_prefix = "boardreq_pipeline" if include_excluded else "boardreq_active"
     req_manage = filter_by_job_status(region_filter(requirement_summary_df(engine), active_region), include_excluded=include_excluded)
     req_manage = req_manage.loc[req_manage["class_name"] == selected_class].copy() if not req_manage.empty else pd.DataFrame()
+
     if req_manage.empty:
         st.info("No requirement rows shown on this board.")
     else:
@@ -1194,14 +1285,11 @@ def render_planning_board(active_region: str, include_excluded: bool = False, se
         manage_df = manage_df.merge(rental_manage, on=["job_id", "resource_class_id"], how="left")
         manual_manage_df = build_manual_manage_df(manage_df, manual_manage)
         manage_df = manage_df.merge(manual_manage_df, on="id", how="left")
-        if "quantity_required" not in manage_df.columns:
-            manage_df["quantity_required"] = 0.0
-        if "assigned_rental" not in manage_df.columns:
-            manage_df["assigned_rental"] = 0.0
+        for col, default in [("quantity_required", 0.0), ("assigned_rental", 0.0), ("rental_vendor", "")]:
+            if col not in manage_df.columns:
+                manage_df[col] = default
         if "manual_assigned_ees" not in manage_df.columns:
             manage_df["manual_assigned_ees"] = None
-        if "rental_vendor" not in manage_df.columns:
-            manage_df["rental_vendor"] = ""
         manage_df["quantity_required"] = pd.to_numeric(manage_df["quantity_required"], errors="coerce").fillna(0.0)
         manage_df["assigned_rental"] = pd.to_numeric(manage_df["assigned_rental"], errors="coerce").fillna(0.0)
         manage_df["assigned_ees"] = pd.to_numeric(manage_df["manual_assigned_ees"], errors="coerce").fillna(
@@ -1209,10 +1297,43 @@ def render_planning_board(active_region: str, include_excluded: bool = False, se
         )
         manage_df["rental_vendor"] = manage_df["rental_vendor"].fillna("")
         manage_df = sort_requirements_like_board(manage_df, board_df)
-        render_requirements_manage_table(manage_df, key_prefix="boardreq_pipeline" if include_excluded else "boardreq_active", highlight_by_job=True)
 
-    st.divider()
-    render_board_jobs_manage_table(board_df, active_region)
+        # Fetch all jobs once for the dialog lookup
+        all_jobs_lookup = region_filter(get_jobs_df(engine), active_region)
+
+        widths = [1.15, 1.35, 0.95, 1.2, 0.85, 0.9, 0.9, 1.0, 1.2, 0.8]
+        headers = ["Customer", "Job Name", "Job Code", "Class", "Quantity", "Assigned EES", "Assigned Rental", "Status", "Notes", "Manage"]
+        hdr = st.columns(widths)
+        for c, h in zip(hdr, headers):
+            c.markdown(f"**{h}**")
+
+        dialog_state_key = f"{key_prefix}_open_req_id"
+
+        for _, row in manage_df.iterrows():
+            cols = st.columns(widths)
+            customer_text = str(row.get("customer", "") or "Unassigned")
+            fill = str(row.get("customer_color", "") or "") or customer_base_color(customer_text)
+            render_highlighted_column(cols[0], customer_text, fill, bold=True)
+            render_highlighted_column(cols[1], str(row.get("job_name", "")), fill)
+            render_highlighted_column(cols[2], str(row["job_code"]), fill)
+            render_highlighted_column(cols[3], str(row["class_name"]), fill)
+            render_highlighted_column(cols[4], format_compact_number(row["quantity_required"]), fill, center=True)
+            render_highlighted_column(cols[5], format_compact_number(row.get("assigned_ees", 0)), fill, center=True)
+            render_highlighted_column(cols[6], format_compact_number(row.get("assigned_rental", 0)), fill, center=True)
+            render_highlighted_column(cols[7], str(row.get("allocation_status", "")), fill)
+            render_highlighted_column(cols[8], str(row.get("notes", "") or ""), fill)
+
+            if cols[9].button("Edit/Delete", key=f"{key_prefix}_open_{row['id']}", use_container_width=True):
+                st.session_state[dialog_state_key] = int(row["id"])
+
+        if dialog_state_key in st.session_state:
+            open_req_id = st.session_state[dialog_state_key]
+            req_match = manage_df.loc[manage_df["id"] == open_req_id]
+            if not req_match.empty:
+                req_row = req_match.iloc[0]
+                job_match = all_jobs_lookup.loc[all_jobs_lookup["id"] == req_row["job_id"]] if not all_jobs_lookup.empty else pd.DataFrame()
+                if not job_match.empty:
+                    _board_row_edit_dialog(req_row, job_match.iloc[0], active_region, key_prefix=f"{key_prefix}_{open_req_id}")
 
 with st.sidebar:
     st.header("Workspace")
