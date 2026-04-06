@@ -1,3 +1,4 @@
+
 from __future__ import annotations
 from datetime import date
 import pandas as pd
@@ -252,10 +253,8 @@ def _board_row_edit_dialog(req_row: pd.Series, job_row: pd.Series, active_region
         unsafe_allow_html=True,
     )
 
-    tab_job, tab_req = st.tabs(["✏️ Job", "📋 Requirement"])
-
-    # ── Job tab ──────────────────────────────────────────────────────────────
-    with tab_job:
+    # ── Job section ──────────────────────────────────────────────────────────
+    if True:
         region_codes = regions_df["region_code"].tolist()
         region_idx = region_codes.index(job_row["region_code"]) if job_row["region_code"] in region_codes else 0
         statuses = ["Bid", "Awarded", "Planned", "Tentative", "Active", "Billing Pending", "Complete", "Cancelled"]
@@ -314,8 +313,10 @@ def _board_row_edit_dialog(req_row: pd.Series, job_row: pd.Series, active_region
         if not confirm_delete:
             st.caption("Check the box above to enable job deletion.")
 
-    # ── Requirement tab ───────────────────────────────────────────────────────
-    with tab_req:
+    # ── Requirement section ───────────────────────────────────────────────────
+    st.divider()
+    st.markdown("**📋 Requirement**")
+    if True:
         rc_df = resource_options_df()
         rc_names = rc_df["class_name"].astype(str).tolist()
         legacy_class = str(req_row["class_name"])
@@ -1952,3 +1953,5 @@ with tab_allocations:
         display_pipeline_ful = format_dates_for_display(pipeline_ful[["job_code","job_name","status","region_code","class_name","fulfillment_type","source_name","specific_resource_name","quantity_assigned","required_start","required_end"]])
         display_pipeline_ful["region_code"] = display_pipeline_ful["region_code"].map(lambda x: region_format(str(x)))
         st.dataframe(display_pipeline_ful, width="stretch")
+
+
