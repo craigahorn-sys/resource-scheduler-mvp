@@ -1327,6 +1327,36 @@ def render_planning_board(active_region: str, include_excluded: bool = False, se
         },
     )
 
+    # ── DEBUG: gridline origin tracer (remove when done) ─────────────────────
+    with st.expander("🔍 Debug: Gridline origins", expanded=False):
+        _x0 = pd.to_datetime(board_start).normalize()
+        _x_end = _x0 + pd.Timedelta(days=7 * num_weeks)
+        _req_dbg = filter_by_job_status(region_filter(requirement_summary_df(engine), active_region), include_excluded=include_excluded)
+        _rent_dbg = filter_by_job_status(region_filter(get_rental_requirements_df(engine), active_region), include_excluded=include_excluded)
+        _man_dbg = filter_by_job_status(region_filter(get_manual_owned_allocations_df(engine), active_region), include_excluded=include_excluded)
+        for _df in [_req_dbg, _rent_dbg, _man_dbg]:
+            if not _df.empty and "class_name" in _df.columns:
+                _df.drop(_df[_df["class_name"] != selected_class].index, inplace=True)
+        _debug_rows = []
+        for _src_label, _src_df in [("Requirement", _req_dbg), ("Rental", _rent_dbg), ("Manual EES", _man_dbg)]:
+            if _src_df.empty:
+                continue
+            for _, _row in _src_df.iterrows():
+                _rs = pd.to_datetime(_row["required_start"]).normalize()
+                _re = pd.to_datetime(_row["required_end"]).normalize() + pd.Timedelta(days=1)
+                _job = f"{_row.get('job_code','?')} {_row.get('job_name','?')}"
+                if _x0 <= _rs <= _x_end:
+                    _debug_rows.append({"Date": _rs.strftime("%b %-d %Y"), "Point": "start", "Source": _src_label, "Job": _job, "required_start": str(_row["required_start"]), "required_end": str(_row["required_end"])})
+                if _x0 <= _re <= _x_end:
+                    _debug_rows.append({"Date": _re.strftime("%b %-d %Y"), "Point": "end+1", "Source": _src_label, "Job": _job, "required_start": str(_row["required_start"]), "required_end": str(_row["required_end"])})
+        if _debug_rows:
+            _dbg_df = pd.DataFrame(_debug_rows).sort_values("Date").reset_index(drop=True)
+            st.dataframe(_dbg_df, use_container_width=True, hide_index=True)
+        else:
+            st.info("No change points found in board window.")
+        st.caption(f"Board window: {_x0.strftime('%b %-d')} → {_x_end.strftime('%b %-d')} | Weekly lines suppressed if within 3 days of any change point.")
+    # ── END DEBUG ─────────────────────────────────────────────────────────────
+
     # ── Merged board manage table ─────────────────────────────────────────────
     st.markdown("##### Manage Jobs & Requirements Shown on Board")
     key_prefix = "boardreq_pipeline" if include_excluded else "boardreq_active"
