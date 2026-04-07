@@ -99,6 +99,60 @@ except Exception:
 if "create_job_start_date" not in st.session_state:
     st.session_state["create_job_start_date"] = date.today()
 
+# 25 curated highlighter-style colors
+JOB_COLOR_PALETTE = [
+    "#FF4D4D", "#FF7F00", "#FFB300", "#FFE033", "#BFFF00",
+    "#57FF4A", "#00E676", "#00E5CC", "#00CFFF", "#2979FF",
+    "#651FFF", "#D500F9", "#FF1493", "#FF6680", "#FF9966",
+    "#FFCC80", "#FFF176", "#C5E1A5", "#80DEEA", "#81D4FA",
+    "#CE93D8", "#F48FB1", "#BCAAA4", "#B0BEC5", "#FFFFFF",
+]
+
+def color_swatch_picker(label: str, key: str, default: str = "#FF4D4D") -> str:
+    """Renders a 5×5 grid of color swatches. Returns the selected hex color."""
+    current = st.session_state.get(f"_swatch_{key}", None)
+    if current not in JOB_COLOR_PALETTE:
+        current = default if default in JOB_COLOR_PALETTE else JOB_COLOR_PALETTE[0]
+        st.session_state[f"_swatch_{key}"] = current
+
+    st.markdown(f"<div style='font-size:0.85rem;font-weight:600;margin-bottom:2px;'>{label}</div>", unsafe_allow_html=True)
+
+    # Inject CSS once to style the swatch buttons
+    st.markdown("""
+    <style>
+    button[data-swatch="true"] { padding: 0 !important; min-height: 0 !important; }
+    </style>
+    """, unsafe_allow_html=True)
+
+    cols_per_row = 5
+    rows = [JOB_COLOR_PALETTE[i:i+cols_per_row] for i in range(0, len(JOB_COLOR_PALETTE), cols_per_row)]
+    for row_colors in rows:
+        cols = st.columns(cols_per_row)
+        for col, hex_color in zip(cols, row_colors):
+            is_selected = (hex_color == current)
+            outline = "3px solid #111" if is_selected else "2px solid #bbb"
+            light_colors = {"#FFFFFF", "#FFF176", "#FFE033", "#BFFF00", "#C5E1A5", "#FFCC80", "#FFB300"}
+            check = "✓" if is_selected else ""
+            text_col = "#000" if hex_color in light_colors else "#fff"
+            col.markdown(
+                f"<div style='background:{hex_color};outline:{outline};border-radius:5px;"
+                f"height:26px;display:flex;align-items:center;justify-content:center;"
+                f"font-size:13px;font-weight:700;color:{text_col};margin:1px;cursor:pointer;'>{check}</div>",
+                unsafe_allow_html=True,
+            )
+            if col.button("​", key=f"_swatchbtn_{key}_{hex_color}", help=hex_color, use_container_width=True):
+                st.session_state[f"_swatch_{key}"] = hex_color
+                current = hex_color
+                st.rerun()
+
+    st.markdown(
+        f"<div style='display:flex;align-items:center;gap:8px;margin-top:4px;'>"
+        f"<div style='width:18px;height:18px;background:{current};border:2px solid #999;border-radius:3px;flex-shrink:0;'></div>"
+        f"<span style='font-size:0.78rem;color:#666;'>{current}</span></div>",
+        unsafe_allow_html=True,
+    )
+    return current
+
 def format_date_value(value):
     if pd.isna(value):
         return ""
@@ -261,7 +315,13 @@ def _board_row_edit_dialog(req_row: pd.Series, job_row: pd.Series, active_region
 
         c1, c2 = st.columns(2)
         edit_customer = c1.text_input("Customer", value=str(job_row.get("customer", "") or ""))
-        edit_customer_color = c2.color_picker("Job Color", value=str(job_row.get("customer_color", "") or "#1f77b4"))
+        # Seed swatch from job's existing color on first render
+        _color_key = f"job_{int(job_row['id'])}_color"
+        _existing_color = str(job_row.get("customer_color", "") or "")
+        if f"_swatch_{_color_key}" not in st.session_state:
+            st.session_state[f"_swatch_{_color_key}"] = _existing_color if _existing_color in JOB_COLOR_PALETTE else JOB_COLOR_PALETTE[0]
+        with c2:
+            edit_customer_color = color_swatch_picker("Job Color", key=_color_key, default=_existing_color)
 
         c3, c4 = st.columns(2)
         edit_job_name = c3.text_input("Job Name", value=str(job_row["job_name"]))
@@ -394,7 +454,12 @@ def _job_edit_dialog(row: pd.Series, active_region: str):
 
     c1, c2 = st.columns(2)
     edit_customer = c1.text_input("Customer", value=str(row.get("customer", "") or ""))
-    edit_customer_color = c2.color_picker("Job Color", value=str(row.get("customer_color", "") or "#1f77b4"))
+    _color_key_jd = f"job_{int(row['id'])}_color"
+    _existing_color_jd = str(row.get("customer_color", "") or "")
+    if f"_swatch_{_color_key_jd}" not in st.session_state:
+        st.session_state[f"_swatch_{_color_key_jd}"] = _existing_color_jd if _existing_color_jd in JOB_COLOR_PALETTE else JOB_COLOR_PALETTE[0]
+    with c2:
+        edit_customer_color = color_swatch_picker("Job Color", key=_color_key_jd, default=_existing_color_jd)
 
     c3, c4 = st.columns(2)
     edit_job_name = c3.text_input("Job Name", value=str(row["job_name"]))
@@ -1405,7 +1470,8 @@ with tab_jobs:
     c1, c2, c3 = st.columns(3)
     with c1:
         customer = st.text_input("Customer", key=f"create_job_customer_{region_key_suffix}")
-        customer_color = st.color_picker("Job Color", value="#1f77b4", key=f"create_job_customer_color_{region_key_suffix}")
+        _create_color_key = f"create_job_color_{region_key_suffix}"
+        customer_color = color_swatch_picker("Job Color", key=_create_color_key, default=JOB_COLOR_PALETTE[0])
         region_code = st.selectbox(
             "Region",
             region_list,
