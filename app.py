@@ -99,34 +99,6 @@ except Exception:
 if "create_job_start_date" not in st.session_state:
     st.session_state["create_job_start_date"] = date.today()
 
-# Execute any action queued by a dialog (dialogs close when st.rerun() fires
-# from inside them, but the actual DB work must happen outside the dialog context)
-if "_pending_action" in st.session_state:
-    _action, _id, _data = st.session_state.pop("_pending_action")
-    if _action == "save_job":
-        update_job(engine, _id, _data)
-    elif _action == "delete_job":
-        delete_job(engine, _id)
-    elif _action == "save_req":
-        update_requirement(engine, _id, {
-            "resource_class_id": _data["rc_id"],
-            "quantity_required": _data["qty"],
-            "days_before_job_start": _data["before"],
-            "days_after_job_end": _data["after"],
-            "priority": _data["priority"],
-            "notes": _data["notes"],
-        })
-        upsert_manual_owned_allocation_for_job_class(
-            engine, _data["job_id"], _data["rc_id"], _data["ees"],
-            _data["before"], _data["after"], _data["notes"], requirement_id=_id,
-        )
-        upsert_rental_requirement_for_job_class(
-            engine, _data["job_id"], _data["rc_id"],
-            _data["rental"], _data["before"], _data["after"], _data["vendor"], _data["notes"],
-        )
-    elif _action == "delete_req":
-        delete_requirement(engine, _id)
-
 def format_date_value(value):
     if pd.isna(value):
         return ""
@@ -321,7 +293,7 @@ def _board_row_edit_dialog(req_row: pd.Series, job_row: pd.Series, active_region
         confirm_delete = st.checkbox("✔ Confirm delete job — this cannot be undone (also deletes all requirements)")
         col_save, col_delete = st.columns(2)
         if col_save.button("💾 Save Job", type="primary", use_container_width=True, key=f"{key_prefix}_dlg_save_job"):
-            st.session_state["_pending_action"] = ("save_job", int(job_row["id"]), {
+            update_job(engine, int(job_row["id"]), {
                 "job_name": edit_job_name,
                 "region_code": active_region_value(active_region, edit_region),
                 "customer": edit_customer,
@@ -336,7 +308,7 @@ def _board_row_edit_dialog(req_row: pd.Series, job_row: pd.Series, active_region
             })
             st.rerun()
         if col_delete.button("🗑 Delete Job", type="secondary", use_container_width=True, disabled=not confirm_delete, key=f"{key_prefix}_dlg_delete_job"):
-            st.session_state["_pending_action"] = ("delete_job", int(job_row["id"]), {})
+            delete_job(engine, int(job_row["id"]))
             st.rerun()
         if not confirm_delete:
             st.caption("Check the box above to enable job deletion.")
@@ -381,21 +353,26 @@ def _board_row_edit_dialog(req_row: pd.Series, job_row: pd.Series, active_region
         st.divider()
         col_save_req, col_del_req = st.columns(2)
         if col_save_req.button("💾 Save Requirement", type="primary", use_container_width=True, key=f"{key_prefix}_dlg_save_req"):
-            st.session_state["_pending_action"] = ("save_req", int(req_row["id"]), {
-                "job_id": int(req_row["job_id"]),
-                "rc_id": edit_rc_id,
-                "qty": float(edit_qty),
-                "ees": min(float(edit_assigned_ees), float(edit_qty)),
-                "rental": float(edit_assigned_rental),
-                "before": int(edit_before),
-                "after": int(edit_after),
-                "vendor": edit_vendor,
+            capped_ees = min(float(edit_assigned_ees), float(edit_qty))
+            update_requirement(engine, int(req_row["id"]), {
+                "resource_class_id": edit_rc_id,
+                "quantity_required": float(edit_qty),
+                "days_before_job_start": int(edit_before),
+                "days_after_job_end": int(edit_after),
                 "priority": edit_priority,
                 "notes": edit_req_notes,
             })
+            upsert_manual_owned_allocation_for_job_class(
+                engine, int(req_row["job_id"]), int(edit_rc_id), capped_ees,
+                int(edit_before), int(edit_after), edit_req_notes, requirement_id=int(req_row["id"]),
+            )
+            upsert_rental_requirement_for_job_class(
+                engine, int(req_row["job_id"]), int(edit_rc_id),
+                float(edit_assigned_rental), int(edit_before), int(edit_after), edit_vendor, edit_req_notes,
+            )
             st.rerun()
         if col_del_req.button("🗑 Delete Requirement", type="secondary", use_container_width=True, key=f"{key_prefix}_dlg_del_req"):
-            st.session_state["_pending_action"] = ("delete_req", int(req_row["id"]), {})
+            delete_requirement(engine, int(req_row["id"]))
             st.rerun()
 
 
@@ -451,7 +428,7 @@ def _job_edit_dialog(row: pd.Series, active_region: str):
     col_save, col_delete = st.columns(2)
 
     if col_save.button("💾 Save Changes", type="primary", use_container_width=True):
-        st.session_state["_pending_action"] = ("save_job", int(row["id"]), {
+        update_job(engine, int(row["id"]), {
             "job_name": edit_job_name,
             "region_code": active_region_value(active_region, edit_region),
             "customer": edit_customer,
@@ -467,7 +444,7 @@ def _job_edit_dialog(row: pd.Series, active_region: str):
         st.rerun()
 
     if col_delete.button("🗑 Delete Job", type="secondary", use_container_width=True, disabled=not confirm_delete):
-        st.session_state["_pending_action"] = ("delete_job", int(row["id"]), {})
+        delete_job(engine, int(row["id"]))
         st.rerun()
 
     if not confirm_delete:
