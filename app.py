@@ -101,11 +101,11 @@ if "create_job_start_date" not in st.session_state:
 
 # 25 curated highlighter-style colors
 JOB_COLOR_PALETTE = [
-    "#FF4D4D", "#FF7F00", "#FFB300", "#FFE033", "#BFFF00",
-    "#57FF4A", "#00E676", "#00E5CC", "#00CFFF", "#2979FF",
-    "#651FFF", "#D500F9", "#FF1493", "#FF6680", "#FF9966",
-    "#FFCC80", "#FFF176", "#C5E1A5", "#80DEEA", "#81D4FA",
-    "#CE93D8", "#F48FB1", "#BCAAA4", "#B0BEC5", "#FFFFFF",
+    "#EED202", "#FFFF00", "#BFFF00", "#00FF00", "#AAF0D1",
+    "#17E9E9", "#008FFE", "#BF00FF", "#FF1DCE", "#FD5B78",
+    "#DA1D81", "#FF003F", "#FFBF00", "#FF8214", "#808000",
+    "#556B2F", "#967117", "#738678", "#888064", "#d2d2cd",
+    "#b8b5a7", "#a4a5a1",
 ]
 
 def color_swatch_picker(label: str, key: str, default: str = "#FF4D4D") -> str:
