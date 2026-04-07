@@ -1456,6 +1456,7 @@ with tab_jobs:
             })
             st.success("Created job.")
             st.session_state["create_job_reset_counter"] += 1
+            st.session_state.pop("jobs_table_open_job_id", None)
             st.rerun()
 
     jobs_df = filter_active_jobs_for_management(region_filter(get_jobs_df(engine), ACTIVE_REGION))
