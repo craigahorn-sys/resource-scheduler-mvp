@@ -865,7 +865,10 @@ def build_planning_board_data(active_region: str, selected_class: str | None, st
     if not class_options:
         return pd.DataFrame(), pd.DataFrame(), [], [], [], None, ""
 
-    if not selected_class or selected_class not in class_options:
+    if not selected_class:
+        selected_class = class_options[0]
+    elif selected_class not in class_options and not include_excluded:
+        # Only reset to default for the main board; Bid/Awarded board mirrors main board selection
         selected_class = class_options[0]
 
     req = req.loc[req["class_name"] == selected_class].copy() if not req.empty else pd.DataFrame()
@@ -1084,7 +1087,9 @@ def render_planning_board(active_region: str, include_excluded: bool = False, se
 
     if include_excluded:
         selected_class = st.session_state.get(active_planning_class_key)
-        if selected_class not in class_options:
+        # Use whatever the main board has selected; don't reset to class_options[0]
+        # if the class simply has no Bid/Awarded rows — board data will be empty in that case
+        if not selected_class:
             selected_class = class_options[0]
 
         board_start = st.session_state.get(active_planning_start_key, date.today())
