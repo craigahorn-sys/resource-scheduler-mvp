@@ -492,7 +492,7 @@ def render_jobs_manage_table(df: pd.DataFrame, active_region: str):
             st.session_state[dialog_key] = (int(row["id"]), active_region)
 
     if dialog_key in st.session_state:
-        open_id, open_region = st.session_state[dialog_key]
+        open_id, open_region = st.session_state.pop(dialog_key)
         match = df.loc[df["id"] == open_id]
         if not match.empty:
             _job_edit_dialog(match.iloc[0], open_region)
@@ -1343,7 +1343,7 @@ def render_planning_board(active_region: str, include_excluded: bool = False, se
                 st.session_state[dialog_state_key] = int(row["id"])
 
         if dialog_state_key in st.session_state:
-            open_req_id = st.session_state[dialog_state_key]
+            open_req_id = st.session_state.pop(dialog_state_key)
             req_match = manage_df.loc[manage_df["id"] == open_req_id]
             if not req_match.empty:
                 req_row = req_match.iloc[0]
@@ -1456,6 +1456,7 @@ with tab_jobs:
             })
             st.success("Created job.")
             st.session_state["create_job_reset_counter"] += 1
+            st.session_state.pop("jobs_table_open_job_id", None)
             st.rerun()
 
     jobs_df = filter_active_jobs_for_management(region_filter(get_jobs_df(engine), ACTIVE_REGION))
