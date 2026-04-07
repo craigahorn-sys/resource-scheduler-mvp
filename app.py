@@ -883,7 +883,7 @@ def compute_planning_segments(req: pd.DataFrame, rental_df: pd.DataFrame, manual
     x_end = x0 + pd.Timedelta(days=7 * num_weeks)
 
     change_points = {x0, x_end}
-    for source_df in [req, rental_df, manual_df]:
+    for source_df in [req, rental_df]:
         if not source_df.empty:
             for _, row in source_df.iterrows():
                 start = pd.to_datetime(row["required_start"]).normalize()
