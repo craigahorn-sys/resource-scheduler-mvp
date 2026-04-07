@@ -306,9 +306,13 @@ def _board_row_edit_dialog(req_row: pd.Series, job_row: pd.Series, active_region
                 "status": edit_status,
                 "notes": edit_job_notes,
             })
+            for _k in [f"boardreq_active_open_req_id", f"boardreq_pipeline_open_req_id"]:
+                st.session_state.pop(_k, None)
             st.rerun()
         if col_delete.button("🗑 Delete Job", type="secondary", use_container_width=True, disabled=not confirm_delete, key=f"{key_prefix}_dlg_delete_job"):
             delete_job(engine, int(job_row["id"]))
+            for _k in [f"boardreq_active_open_req_id", f"boardreq_pipeline_open_req_id"]:
+                st.session_state.pop(_k, None)
             st.rerun()
         if not confirm_delete:
             st.caption("Check the box above to enable job deletion.")
@@ -370,9 +374,13 @@ def _board_row_edit_dialog(req_row: pd.Series, job_row: pd.Series, active_region
                 engine, int(req_row["job_id"]), int(edit_rc_id),
                 float(edit_assigned_rental), int(edit_before), int(edit_after), edit_vendor, edit_req_notes,
             )
+            for _k in [f"boardreq_active_open_req_id", f"boardreq_pipeline_open_req_id"]:
+                st.session_state.pop(_k, None)
             st.rerun()
         if col_del_req.button("🗑 Delete Requirement", type="secondary", use_container_width=True, key=f"{key_prefix}_dlg_del_req"):
             delete_requirement(engine, int(req_row["id"]))
+            for _k in [f"boardreq_active_open_req_id", f"boardreq_pipeline_open_req_id"]:
+                st.session_state.pop(_k, None)
             st.rerun()
 
 
@@ -441,10 +449,12 @@ def _job_edit_dialog(row: pd.Series, active_region: str):
             "status": edit_status,
             "notes": edit_notes,
         })
+        st.session_state.pop("jobs_table_open_job_id", None)
         st.rerun()
 
     if col_delete.button("🗑 Delete Job", type="secondary", use_container_width=True, disabled=not confirm_delete):
         delete_job(engine, int(row["id"]))
+        st.session_state.pop("jobs_table_open_job_id", None)
         st.rerun()
 
     if not confirm_delete:
