@@ -105,7 +105,6 @@ JOB_COLOR_PALETTE = [
     "#17E9E9", "#008FFE", "#BF00FF", "#FF1DCE", "#FD5B78",
     "#DA1D81", "#FF003F", "#FFBF00", "#FF8214", "#808000",
     "#556B2F", "#967117", "#738678", "#888064", "#d2d2cd",
-    "#b8b5a7", "#a4a5a1",
 ]
 
 def color_swatch_picker(label: str, key: str, default: str = "#FF4D4D") -> str:
