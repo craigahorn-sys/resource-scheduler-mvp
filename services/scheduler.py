@@ -677,8 +677,7 @@ def upsert_manual_owned_allocation_for_job_class(engine, job_id: int, resource_c
                 text("DELETE FROM job_manual_owned_allocations WHERE job_id=:job_id AND resource_class_id=:resource_class_id AND requirement_id IS NULL"),
                 {"job_id": int(job_id), "resource_class_id": int(resource_class_id)},
             )
-        if float(quantity_assigned) > 0:
-            conn.execute(text("""
+        conn.execute(text("""
                 INSERT INTO job_manual_owned_allocations(
                     job_id, requirement_id, resource_class_id, quantity_assigned, days_before_job_start, days_after_job_end, notes
                 ) VALUES (
