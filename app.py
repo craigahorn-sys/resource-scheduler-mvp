@@ -306,13 +306,9 @@ def _board_row_edit_dialog(req_row: pd.Series, job_row: pd.Series, active_region
                 "status": edit_status,
                 "notes": edit_job_notes,
             })
-            for _k in [f"boardreq_active_open_req_id", f"boardreq_pipeline_open_req_id"]:
-                st.session_state.pop(_k, None)
             st.rerun()
         if col_delete.button("🗑 Delete Job", type="secondary", use_container_width=True, disabled=not confirm_delete, key=f"{key_prefix}_dlg_delete_job"):
             delete_job(engine, int(job_row["id"]))
-            for _k in [f"boardreq_active_open_req_id", f"boardreq_pipeline_open_req_id"]:
-                st.session_state.pop(_k, None)
             st.rerun()
         if not confirm_delete:
             st.caption("Check the box above to enable job deletion.")
@@ -374,13 +370,9 @@ def _board_row_edit_dialog(req_row: pd.Series, job_row: pd.Series, active_region
                 engine, int(req_row["job_id"]), int(edit_rc_id),
                 float(edit_assigned_rental), int(edit_before), int(edit_after), edit_vendor, edit_req_notes,
             )
-            for _k in [f"boardreq_active_open_req_id", f"boardreq_pipeline_open_req_id"]:
-                st.session_state.pop(_k, None)
             st.rerun()
         if col_del_req.button("🗑 Delete Requirement", type="secondary", use_container_width=True, key=f"{key_prefix}_dlg_del_req"):
             delete_requirement(engine, int(req_row["id"]))
-            for _k in [f"boardreq_active_open_req_id", f"boardreq_pipeline_open_req_id"]:
-                st.session_state.pop(_k, None)
             st.rerun()
 
 
@@ -449,12 +441,10 @@ def _job_edit_dialog(row: pd.Series, active_region: str):
             "status": edit_status,
             "notes": edit_notes,
         })
-        st.session_state.pop("jobs_table_open_job_id", None)
         st.rerun()
 
     if col_delete.button("🗑 Delete Job", type="secondary", use_container_width=True, disabled=not confirm_delete):
         delete_job(engine, int(row["id"]))
-        st.session_state.pop("jobs_table_open_job_id", None)
         st.rerun()
 
     if not confirm_delete:
@@ -492,7 +482,7 @@ def render_jobs_manage_table(df: pd.DataFrame, active_region: str):
             st.session_state[dialog_key] = (int(row["id"]), active_region)
 
     if dialog_key in st.session_state:
-        open_id, open_region = st.session_state[dialog_key]
+        open_id, open_region = st.session_state.pop(dialog_key)
         match = df.loc[df["id"] == open_id]
         if not match.empty:
             _job_edit_dialog(match.iloc[0], open_region)
@@ -1287,12 +1277,13 @@ def render_planning_board(active_region: str, include_excluded: bool = False, se
 
         rental_manage = filter_by_job_status(region_filter(get_rental_requirements_df(engine), active_region), include_excluded=include_excluded)
         rental_manage = rental_manage.loc[rental_manage["class_name"] == selected_class].copy() if not rental_manage.empty else pd.DataFrame()
-        rental_manage = rental_manage[["job_id", "resource_class_id", "quantity_required", "vendor_name"]].copy() if not rental_manage.empty else pd.DataFrame(columns=["job_id", "resource_class_id", "quantity_required", "vendor_name"])
         if not rental_manage.empty:
             rental_manage = rental_manage.groupby(["job_id", "resource_class_id"], as_index=False).agg(
                 assigned_rental=("quantity_required", "sum"),
                 rental_vendor=("vendor_name", lambda s: ", ".join(sorted({str(v).strip() for v in s if str(v).strip()}))),
             )
+        else:
+            rental_manage = pd.DataFrame(columns=["job_id", "resource_class_id", "assigned_rental", "rental_vendor"])
 
         manual_manage = filter_by_job_status(region_filter(get_manual_owned_allocations_df(engine), active_region), include_excluded=include_excluded)
         manual_manage = manual_manage.loc[manual_manage["class_name"] == selected_class].copy() if not manual_manage.empty else pd.DataFrame()
@@ -1301,12 +1292,22 @@ def render_planning_board(active_region: str, include_excluded: bool = False, se
         manage_df = manage_df.merge(rental_manage, on=["job_id", "resource_class_id"], how="left")
         manual_manage_df = build_manual_manage_df(manage_df, manual_manage)
         manage_df = manage_df.merge(manual_manage_df, on="id", how="left")
-        for col, default in [("quantity_required", 0.0), ("assigned_rental", 0.0), ("rental_vendor", "")]:
+
+        # Resolve any suffixed columns from unexpected merges
+        for col in ["quantity_required", "assigned_rental", "rental_vendor", "manual_assigned_ees"]:
+            for suffix in ["_x", "_y"]:
+                if f"{col}{suffix}" in manage_df.columns:
+                    if col not in manage_df.columns:
+                        manage_df[col] = manage_df[f"{col}{suffix}"]
+                    manage_df = manage_df.drop(columns=[f"{col}{suffix}"])
+        for col, default in [("assigned_rental", 0.0), ("rental_vendor", "")]:
             if col not in manage_df.columns:
                 manage_df[col] = default
         if "manual_assigned_ees" not in manage_df.columns:
             manage_df["manual_assigned_ees"] = None
-        manage_df["quantity_required"] = pd.to_numeric(manage_df["quantity_required"], errors="coerce").fillna(0.0)
+        if "quantity_required" not in manage_df.columns:
+            manage_df["quantity_required"] = 0.0
+        manage_df["quantity_required"] = manage_df["quantity_required"].astype(float)
         manage_df["assigned_rental"] = pd.to_numeric(manage_df["assigned_rental"], errors="coerce").fillna(0.0)
         manage_df["assigned_ees"] = pd.to_numeric(manage_df["manual_assigned_ees"], errors="coerce").fillna(
             (manage_df["quantity_required"] - manage_df["assigned_rental"]).clip(lower=0)
@@ -1343,7 +1344,7 @@ def render_planning_board(active_region: str, include_excluded: bool = False, se
                 st.session_state[dialog_state_key] = int(row["id"])
 
         if dialog_state_key in st.session_state:
-            open_req_id = st.session_state[dialog_state_key]
+            open_req_id = st.session_state.pop(dialog_state_key)
             req_match = manage_df.loc[manage_df["id"] == open_req_id]
             if not req_match.empty:
                 req_row = req_match.iloc[0]
