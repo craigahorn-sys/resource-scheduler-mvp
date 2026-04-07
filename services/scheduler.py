@@ -578,9 +578,16 @@ def delete_manual_owned_allocation(engine, manual_allocation_id: int):
 def upsert_manual_owned_allocation_for_job_class(engine, job_id: int, resource_class_id: int, quantity_assigned: float, days_before_job_start: int, days_after_job_end: int, notes: str = "", requirement_id: int | None = None):
     with engine.begin() as conn:
         if requirement_id is not None:
+            # Delete the record tied to this specific requirement
             conn.execute(
                 text("DELETE FROM job_manual_owned_allocations WHERE requirement_id=:requirement_id"),
                 {"requirement_id": int(requirement_id)},
+            )
+            # Also clean up any legacy NULL-requirement_id records for the same job/class
+            # (created before requirement_id column existed, or via old save paths)
+            conn.execute(
+                text("DELETE FROM job_manual_owned_allocations WHERE job_id=:job_id AND resource_class_id=:resource_class_id AND requirement_id IS NULL"),
+                {"job_id": int(job_id), "resource_class_id": int(resource_class_id)},
             )
         else:
             conn.execute(
