@@ -1277,12 +1277,13 @@ def render_planning_board(active_region: str, include_excluded: bool = False, se
 
         rental_manage = filter_by_job_status(region_filter(get_rental_requirements_df(engine), active_region), include_excluded=include_excluded)
         rental_manage = rental_manage.loc[rental_manage["class_name"] == selected_class].copy() if not rental_manage.empty else pd.DataFrame()
-        rental_manage = rental_manage[["job_id", "resource_class_id", "quantity_required", "vendor_name"]].copy() if not rental_manage.empty else pd.DataFrame(columns=["job_id", "resource_class_id", "quantity_required", "vendor_name"])
         if not rental_manage.empty:
             rental_manage = rental_manage.groupby(["job_id", "resource_class_id"], as_index=False).agg(
                 assigned_rental=("quantity_required", "sum"),
                 rental_vendor=("vendor_name", lambda s: ", ".join(sorted({str(v).strip() for v in s if str(v).strip()}))),
             )
+        else:
+            rental_manage = pd.DataFrame(columns=["job_id", "resource_class_id", "assigned_rental", "rental_vendor"])
 
         manual_manage = filter_by_job_status(region_filter(get_manual_owned_allocations_df(engine), active_region), include_excluded=include_excluded)
         manual_manage = manual_manage.loc[manual_manage["class_name"] == selected_class].copy() if not manual_manage.empty else pd.DataFrame()
@@ -1291,12 +1292,22 @@ def render_planning_board(active_region: str, include_excluded: bool = False, se
         manage_df = manage_df.merge(rental_manage, on=["job_id", "resource_class_id"], how="left")
         manual_manage_df = build_manual_manage_df(manage_df, manual_manage)
         manage_df = manage_df.merge(manual_manage_df, on="id", how="left")
-        for col, default in [("quantity_required", 0.0), ("assigned_rental", 0.0), ("rental_vendor", "")]:
+
+        # Resolve any suffixed columns from unexpected merges
+        for col in ["quantity_required", "assigned_rental", "rental_vendor", "manual_assigned_ees"]:
+            for suffix in ["_x", "_y"]:
+                if f"{col}{suffix}" in manage_df.columns:
+                    if col not in manage_df.columns:
+                        manage_df[col] = manage_df[f"{col}{suffix}"]
+                    manage_df = manage_df.drop(columns=[f"{col}{suffix}"])
+        for col, default in [("assigned_rental", 0.0), ("rental_vendor", "")]:
             if col not in manage_df.columns:
                 manage_df[col] = default
         if "manual_assigned_ees" not in manage_df.columns:
             manage_df["manual_assigned_ees"] = None
-        manage_df["quantity_required"] = pd.to_numeric(manage_df["quantity_required"], errors="coerce").fillna(0.0)
+        if "quantity_required" not in manage_df.columns:
+            manage_df["quantity_required"] = 0.0
+        manage_df["quantity_required"] = manage_df["quantity_required"].astype(float)
         manage_df["assigned_rental"] = pd.to_numeric(manage_df["assigned_rental"], errors="coerce").fillna(0.0)
         manage_df["assigned_ees"] = pd.to_numeric(manage_df["manual_assigned_ees"], errors="coerce").fillna(
             (manage_df["quantity_required"] - manage_df["assigned_rental"]).clip(lower=0)
