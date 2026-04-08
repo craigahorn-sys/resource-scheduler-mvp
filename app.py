@@ -586,7 +586,7 @@ def render_jobs_manage_table(df: pd.DataFrame, active_region: str):
         render_highlighted_column(cols[2], str(row["job_code"]), fill)
         render_highlighted_column(cols[3], format_date_value(row["mob_start_date"]), fill, center=True)
         render_highlighted_column(cols[4], format_date_value(row["job_start_date"]), fill, center=True)
-        render_highlighted_column(cols[5], f"{int(row['job_duration_days'])}d", fill, center=True)
+        render_highlighted_column(cols[5], f"{int(row['job_duration_days'])} days", fill, center=True)
         render_highlighted_column(cols[6], format_date_value(row["job_end_date"]), fill, center=True)
         render_highlighted_column(cols[7], format_date_value(row["demob_end_date"]), fill, center=True)
 
