@@ -356,7 +356,12 @@ def requirement_summary_df(engine):
                 SELECT SUM(mo.quantity_assigned)
                 FROM job_manual_owned_allocations mo
                 WHERE mo.requirement_id = jr.id
-            ), 0) AS quantity_assigned_manual
+            ), 0) AS quantity_assigned_manual,
+            COALESCE((
+                SELECT SUM(rr.quantity_required)
+                FROM job_rental_requirements rr
+                WHERE rr.requirement_id = jr.id
+            ), 0) AS quantity_assigned_rental
         FROM job_requirements jr
         JOIN jobs j ON jr.job_id=j.id
         JOIN resource_classes rc ON jr.resource_class_id=rc.id
@@ -378,8 +383,11 @@ def requirement_summary_df(engine):
     df["required_end"] = ends
     df["quantity_assigned_pool"] = df["quantity_assigned_pool"].astype(float)
     df["quantity_assigned_manual"] = df["quantity_assigned_manual"].astype(float)
-    # Use the greater of pool fulfillment or manual EES entry
-    df["quantity_assigned"] = df[["quantity_assigned_pool", "quantity_assigned_manual"]].max(axis=1)
+    df["quantity_assigned_rental"] = df["quantity_assigned_rental"].astype(float)
+    df["quantity_assigned_manual_total"] = df["quantity_assigned_manual"] + df["quantity_assigned_rental"]
+    # quantity_assigned = the greater of pool fulfillment OR (manual EES + rental)
+    df["quantity_assigned"] = df[["quantity_assigned_pool", "quantity_assigned_manual_total"]].max(axis=1)
+    df = df.drop(columns=["quantity_assigned_manual_total"])
     df["quantity_shortfall"] = (df["quantity_required"].astype(float) - df["quantity_assigned"]).clip(lower=0)
     def status(row):
         req = float(row["quantity_required"]); assigned = float(row["quantity_assigned"]); shortfall = max(req - assigned, 0.0)
