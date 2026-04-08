@@ -1952,9 +1952,6 @@ with tab_requirements:
         st.info("No requirements yet.")
     else:
         req_summary = sort_requirements_by_class_order(req_summary)
-        display_req = format_dates_for_display(req_summary[["job_code","job_name","region_code","class_name","quantity_required","unit_type","required_start","required_end","quantity_assigned","quantity_shortfall","allocation_status"]])
-        display_req["region_code"] = display_req["region_code"].map(lambda x: region_format(str(x)))
-        st.dataframe(display_req, width="stretch")
         rental_manage = region_filter(get_rental_requirements_df(engine), ACTIVE_REGION)
         rental_manage = build_rental_manage_df(rental_manage)
         manual_manage = region_filter(get_manual_owned_allocations_df(engine), ACTIVE_REGION)
@@ -1974,9 +1971,15 @@ with tab_requirements:
             manage_df["rental_vendor"] = manage_df["rental_vendor"].fillna(manage_df["rental_vendor_leg"])
             manage_df = manage_df.drop(columns=["assigned_rental_leg", "rental_vendor_leg"], errors="ignore")
         manage_df = manage_df.merge(build_manual_manage_df(manage_df, manual_manage), on="id", how="left")
-        manage_df["assigned_rental"] = manage_df["assigned_rental"].fillna(0.0)
-        manage_df["assigned_ees"] = manage_df["manual_assigned_ees"].fillna((manage_df["quantity_required"].astype(float) - manage_df["assigned_rental"].astype(float)).clip(lower=0))
+        manage_df["assigned_rental"] = pd.to_numeric(manage_df["assigned_rental"], errors="coerce").fillna(0.0)
+        manage_df["assigned_ees"] = pd.to_numeric(manage_df["manual_assigned_ees"], errors="coerce").fillna((manage_df["quantity_required"].astype(float) - manage_df["assigned_rental"]).clip(lower=0))
         manage_df["rental_vendor"] = manage_df["rental_vendor"].fillna("")
+
+        display_req = format_dates_for_display(manage_df[["job_code","job_name","region_code","class_name","quantity_required","unit_type","required_start","required_end","assigned_ees","assigned_rental","quantity_assigned","quantity_shortfall","allocation_status"]].copy())
+        display_req = display_req.rename(columns={"assigned_ees": "manual_ees", "assigned_rental": "rental", "quantity_assigned": "pool_assigned"})
+        display_req["region_code"] = display_req["region_code"].map(lambda x: region_format(str(x)))
+        st.dataframe(display_req, width="stretch")
+
         manage_df = sort_requirements_by_class_order(manage_df)
         render_requirements_manage_table(manage_df)
 
