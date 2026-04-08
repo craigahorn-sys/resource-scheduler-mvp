@@ -356,11 +356,13 @@ def requirement_summary_df(engine):
                 SELECT SUM(mo.quantity_assigned)
                 FROM job_manual_owned_allocations mo
                 WHERE mo.requirement_id = jr.id
+                   OR (mo.requirement_id IS NULL AND mo.job_id = jr.job_id AND mo.resource_class_id = jr.resource_class_id)
             ), 0) AS quantity_assigned_manual,
             COALESCE((
                 SELECT SUM(rr.quantity_required)
                 FROM job_rental_requirements rr
                 WHERE rr.requirement_id = jr.id
+                   OR (rr.requirement_id IS NULL AND rr.job_id = jr.job_id AND rr.resource_class_id = jr.resource_class_id)
             ), 0) AS quantity_assigned_rental
         FROM job_requirements jr
         JOIN jobs j ON jr.job_id=j.id
