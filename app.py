@@ -1975,8 +1975,8 @@ with tab_requirements:
         manage_df["assigned_ees"] = pd.to_numeric(manage_df["manual_assigned_ees"], errors="coerce").fillna((manage_df["quantity_required"].astype(float) - manage_df["assigned_rental"]).clip(lower=0))
         manage_df["rental_vendor"] = manage_df["rental_vendor"].fillna("")
 
-        display_req = format_dates_for_display(manage_df[["job_code","job_name","region_code","class_name","quantity_required","unit_type","required_start","required_end","assigned_ees","assigned_rental","quantity_assigned","quantity_shortfall","allocation_status"]].copy())
-        display_req = display_req.rename(columns={"assigned_ees": "manual_ees", "assigned_rental": "rental", "quantity_assigned": "pool_assigned"})
+        display_req = format_dates_for_display(manage_df[["job_code","job_name","region_code","class_name","quantity_required","unit_type","required_start","required_end","assigned_ees","assigned_rental","quantity_shortfall","allocation_status"]].copy())
+        display_req = display_req.rename(columns={"assigned_ees": "assigned_ees", "assigned_rental": "rental"})
         display_req["region_code"] = display_req["region_code"].map(lambda x: region_format(str(x)))
         st.dataframe(display_req, width="stretch")
 
