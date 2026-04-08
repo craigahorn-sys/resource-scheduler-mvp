@@ -259,6 +259,7 @@ def build_rental_manage_df(rental_df: pd.DataFrame) -> pd.DataFrame:
     return pd.concat([linked, legacy], ignore_index=True)
 
 
+def region_filter(df: pd.DataFrame, active_region: str) -> pd.DataFrame:
     if df.empty or active_region == "Global" or "region_code" not in df.columns:
         return df
     return df.loc[df["region_code"] == active_region].copy()
@@ -592,7 +593,8 @@ def render_jobs_manage_table(df: pd.DataFrame, active_region: str):
             st.session_state[dialog_key] = (int(row["id"]), active_region)
 
     if dialog_key in st.session_state:
-        open_id, open_region = st.session_state.pop(dialog_key)
+        open_id, open_region = st.session_state[dialog_key]
+        del st.session_state[dialog_key]
         match = df.loc[df["id"] == open_id]
         if not match.empty:
             _job_edit_dialog(match.iloc[0], open_region)
@@ -1487,7 +1489,8 @@ def render_planning_board(active_region: str, include_excluded: bool = False, se
                 st.session_state[dialog_state_key] = int(row["id"])
 
         if dialog_state_key in st.session_state:
-            open_req_id = st.session_state.pop(dialog_state_key)
+            open_req_id = st.session_state[dialog_state_key]
+            del st.session_state[dialog_state_key]
             req_match = manage_df.loc[manage_df["id"] == open_req_id]
             if not req_match.empty:
                 req_row = req_match.iloc[0]
@@ -2150,7 +2153,8 @@ with tab_planning:
                     if cols[9].button("Edit/Delete", key=f"{key_prefix_ex}_open_{row['id']}", use_container_width=True):
                         st.session_state[dialog_state_key_ex] = int(row["id"])
                 if dialog_state_key_ex in st.session_state:
-                    open_req_id_ex = st.session_state.pop(dialog_state_key_ex)
+                    open_req_id_ex = st.session_state[dialog_state_key_ex]
+                    del st.session_state[dialog_state_key_ex]
                     req_match_ex = manage_df_ex.loc[manage_df_ex["id"] == open_req_id_ex]
                     if not req_match_ex.empty:
                         req_row_ex = req_match_ex.iloc[0]
