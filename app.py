@@ -568,8 +568,8 @@ def render_jobs_manage_table(df: pd.DataFrame, active_region: str):
         st.info("No jobs yet.")
         return
 
-    widths = [1.3, 1.5, 1.0, 1.0, 1.0, 1.0, 1.0, 0.8]
-    headers = ["Customer", "Job Name", "Job Code", "Mob Start", "Job Start", "Job End", "Demob End", "Manage"]
+    widths = [1.3, 1.5, 1.0, 1.0, 1.0, 0.7, 1.0, 1.0, 0.8]
+    headers = ["Customer", "Job Name", "Job Code", "Mob Start", "Job Start", "Duration", "Job End", "Demob End", "Manage"]
 
     hdr = st.columns(widths)
     for c, h in zip(hdr, headers):
@@ -586,10 +586,11 @@ def render_jobs_manage_table(df: pd.DataFrame, active_region: str):
         render_highlighted_column(cols[2], str(row["job_code"]), fill)
         render_highlighted_column(cols[3], format_date_value(row["mob_start_date"]), fill, center=True)
         render_highlighted_column(cols[4], format_date_value(row["job_start_date"]), fill, center=True)
-        render_highlighted_column(cols[5], format_date_value(row["job_end_date"]), fill, center=True)
-        render_highlighted_column(cols[6], format_date_value(row["demob_end_date"]), fill, center=True)
+        render_highlighted_column(cols[5], f"{int(row['job_duration_days'])}d", fill, center=True)
+        render_highlighted_column(cols[6], format_date_value(row["job_end_date"]), fill, center=True)
+        render_highlighted_column(cols[7], format_date_value(row["demob_end_date"]), fill, center=True)
 
-        if cols[7].button("Edit / Delete", key=f"open_job_dialog_{row['id']}", use_container_width=True):
+        if cols[8].button("Edit / Delete", key=f"open_job_dialog_{row['id']}", use_container_width=True):
             st.session_state[dialog_key] = (int(row["id"]), active_region)
 
     if dialog_key in st.session_state:
