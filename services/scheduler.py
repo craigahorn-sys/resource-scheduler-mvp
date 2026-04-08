@@ -519,6 +519,7 @@ def _rental_requirements_base_df(engine):
         SELECT
             rr.id,
             rr.job_id,
+            rr.requirement_id,
             rr.resource_class_id,
             rr.quantity_required,
             rr.days_before_job_start,
@@ -619,18 +620,25 @@ def get_rental_requirements_df(engine):
     return _rental_requirements_base_df(engine)
 
 
-def upsert_rental_requirement_for_job_class(engine, job_id: int, resource_class_id: int, quantity_required: float, days_before_job_start: int, days_after_job_end: int, vendor_name: str, notes: str = ""):
+def upsert_rental_requirement_for_job_class(engine, job_id: int, resource_class_id: int, quantity_required: float, days_before_job_start: int, days_after_job_end: int, vendor_name: str, notes: str = "", requirement_id: int | None = None):
     with engine.begin() as conn:
-        conn.execute(text("DELETE FROM job_rental_requirements WHERE job_id=:job_id AND resource_class_id=:resource_class_id"), {"job_id": int(job_id), "resource_class_id": int(resource_class_id)})
+        if requirement_id is not None:
+            # Delete only the rental record tied to this specific requirement
+            conn.execute(text("DELETE FROM job_rental_requirements WHERE requirement_id=:requirement_id"), {"requirement_id": int(requirement_id)})
+            # Also clean up any legacy NULL-requirement_id records for this job/class
+            conn.execute(text("DELETE FROM job_rental_requirements WHERE job_id=:job_id AND resource_class_id=:resource_class_id AND requirement_id IS NULL"), {"job_id": int(job_id), "resource_class_id": int(resource_class_id)})
+        else:
+            conn.execute(text("DELETE FROM job_rental_requirements WHERE job_id=:job_id AND resource_class_id=:resource_class_id"), {"job_id": int(job_id), "resource_class_id": int(resource_class_id)})
         if float(quantity_required) > 0:
             conn.execute(text("""
                 INSERT INTO job_rental_requirements(
-                    job_id, resource_class_id, quantity_required, days_before_job_start, days_after_job_end, vendor_name, notes
+                    job_id, requirement_id, resource_class_id, quantity_required, days_before_job_start, days_after_job_end, vendor_name, notes
                 ) VALUES (
-                    :job_id, :resource_class_id, :quantity_required, :days_before_job_start, :days_after_job_end, :vendor_name, :notes
+                    :job_id, :requirement_id, :resource_class_id, :quantity_required, :days_before_job_start, :days_after_job_end, :vendor_name, :notes
                 )
             """), {
                 "job_id": int(job_id),
+                "requirement_id": int(requirement_id) if requirement_id is not None else None,
                 "resource_class_id": int(resource_class_id),
                 "quantity_required": float(quantity_required),
                 "days_before_job_start": int(days_before_job_start),
