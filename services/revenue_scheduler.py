@@ -11,21 +11,26 @@ from .db import execute, query_df
 # ── Migration helpers (run once on startup) ───────────────────────────────────
 
 def migrate_revenue_columns(engine):
-    """Adds billing columns to jobs and creates job_line_items if missing."""
+    """Adds billing columns to jobs and creates job_line_items if missing.
+    Each ALTER runs in its own transaction so a duplicate-column error
+    cannot poison the connection for subsequent statements.
+    """
     billing_cols = [
-        ("company_man",     "TEXT"),
-        ("invoice_number",  "TEXT"),
-        ("so_ticket_number","TEXT"),
-        ("day_rate",        "NUMERIC"),
-        ("accrue",          "BOOLEAN NOT NULL DEFAULT FALSE"),
+        ("company_man",      "TEXT"),
+        ("invoice_number",   "TEXT"),
+        ("so_ticket_number", "TEXT"),
+        ("day_rate",         "NUMERIC"),
+        ("accrue",           "BOOLEAN NOT NULL DEFAULT FALSE"),
     ]
-    with engine.begin() as conn:
-        for col, col_type in billing_cols:
-            try:
+    for col, col_type in billing_cols:
+        try:
+            with engine.begin() as conn:
                 conn.execute(text(f"ALTER TABLE jobs ADD COLUMN {col} {col_type}"))
-            except Exception:
-                pass  # column already exists
+        except Exception:
+            pass  # column already exists — safe to ignore
 
+    # CREATE TABLE IF NOT EXISTS is always safe to run unconditionally
+    with engine.begin() as conn:
         conn.execute(text("""
             CREATE TABLE IF NOT EXISTS job_line_items (
                 id BIGSERIAL PRIMARY KEY,
