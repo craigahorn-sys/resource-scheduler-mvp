@@ -101,17 +101,3 @@ CREATE TABLE IF NOT EXISTS job_manual_owned_allocations (
     notes TEXT
 );
 
-CREATE TABLE IF NOT EXISTS job_line_items (
-    id BIGSERIAL PRIMARY KEY,
-    job_id BIGINT NOT NULL REFERENCES jobs(id) ON DELETE CASCADE,
-    line_number INTEGER,
-    description TEXT NOT NULL,
-    uom TEXT,
-    start_date DATE,
-    end_date DATE,
-    invoice_qty NUMERIC,
-    unit_price NUMERIC,
-    line_total NUMERIC,
-    notes TEXT,
-    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
-);
