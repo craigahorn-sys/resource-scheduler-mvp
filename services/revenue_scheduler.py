@@ -136,8 +136,8 @@ def get_revenue_jobs_df(engine, region_code: str, month: int, year: int) -> pd.D
           AND j.status NOT IN ('Cancelled', 'Bid')
           AND (j.job_start_date, j.job_start_date + j.job_duration_days * INTERVAL '1 day')
               OVERLAPS (
-                  DATE_TRUNC('month', :month_start::date),
-                  DATE_TRUNC('month', :month_start::date) + INTERVAL '1 month'
+                  DATE_TRUNC('month', CAST(:month_start AS date)),
+                  DATE_TRUNC('month', CAST(:month_start AS date)) + INTERVAL '1 month'
               )
         ORDER BY j.job_start_date, j.id
     """, {"region_code": region_code, "month_start": month_start})
