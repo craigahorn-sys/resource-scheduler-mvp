@@ -67,7 +67,10 @@ def get_engine():
         conn = st.connection("sql", type="sql")
         return conn.engine
     except Exception:
-        url = os.getenv("DATABASE_URL") or "sqlite:///resource_scheduler.db"
+        url = os.getenv("DATABASE_URL")
+        if not url:
+            st.error("No database connection configured. Set DATABASE_URL or configure [connections.sql] in secrets.toml.")
+            st.stop()
         return create_engine(url, future=True)
 
 
