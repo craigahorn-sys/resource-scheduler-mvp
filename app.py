@@ -9,6 +9,11 @@ import streamlit as st
 
 from services.db import execute, export_excel, get_engine, init_db, query_df
 from services.models import calc_job_dates
+from services.revenue_scheduler import (
+    migrate_revenue_columns, update_job_billing,
+    get_line_items_df, save_line_items, delete_line_item,
+    get_revenue_jobs_df, build_revenue_excel,
+)
 from services.scheduler import (
     add_pool_adjustment, allocation_debug_df, create_job, create_requirement, delete_job,
     delete_pool, delete_pool_adjustment, delete_requirement, get_fulfillment_df,
@@ -78,6 +83,7 @@ st.markdown(
 
 engine = get_engine()
 init_db(engine)
+migrate_revenue_columns(engine)
 
 try:
     query_df(engine, "SELECT customer_color FROM jobs LIMIT 1")
@@ -568,8 +574,8 @@ def render_jobs_manage_table(df: pd.DataFrame, active_region: str):
         st.info("No jobs yet.")
         return
 
-    widths = [1.3, 1.5, 1.0, 1.0, 1.0, 0.7, 1.0, 1.0, 0.8]
-    headers = ["Customer", "Job Name", "Job Code", "Mob Start", "Job Start", "Duration", "Job End", "Demob End", "Manage"]
+    widths = [1.3, 1.5, 1.0, 1.0, 1.0, 1.0, 1.0, 0.8]
+    headers = ["Customer", "Job Name", "Job Code", "Mob Start", "Job Start", "Job End", "Demob End", "Manage"]
 
     hdr = st.columns(widths)
     for c, h in zip(hdr, headers):
@@ -586,11 +592,10 @@ def render_jobs_manage_table(df: pd.DataFrame, active_region: str):
         render_highlighted_column(cols[2], str(row["job_code"]), fill)
         render_highlighted_column(cols[3], format_date_value(row["mob_start_date"]), fill, center=True)
         render_highlighted_column(cols[4], format_date_value(row["job_start_date"]), fill, center=True)
-        render_highlighted_column(cols[5], f"{int(row['job_duration_days'])} days", fill, center=True)
-        render_highlighted_column(cols[6], format_date_value(row["job_end_date"]), fill, center=True)
-        render_highlighted_column(cols[7], format_date_value(row["demob_end_date"]), fill, center=True)
+        render_highlighted_column(cols[5], format_date_value(row["job_end_date"]), fill, center=True)
+        render_highlighted_column(cols[6], format_date_value(row["demob_end_date"]), fill, center=True)
 
-        if cols[8].button("Edit / Delete", key=f"open_job_dialog_{row['id']}", use_container_width=True):
+        if cols[7].button("Edit / Delete", key=f"open_job_dialog_{row['id']}", use_container_width=True):
             st.session_state[dialog_key] = (int(row["id"]), active_region)
 
     if dialog_key in st.session_state:
@@ -1531,8 +1536,8 @@ if "last_active_region" not in st.session_state:
 if st.session_state["last_active_region"] != ACTIVE_REGION:
     st.session_state["last_active_region"] = ACTIVE_REGION
 
-tab_jobs, tab_job_requirements, tab_planning, tab_pools, tab_requirements, tab_allocations = st.tabs(
-    ["Jobs", "Job Requirements", "Planning Board", "Pools", "Requirements", "Allocations"]
+tab_jobs, tab_job_requirements, tab_planning, tab_pools, tab_requirements, tab_allocations, tab_revenue = st.tabs(
+    ["Jobs", "Job Requirements", "Planning Board", "Pools", "Requirements", "Allocations", "Revenue"]
 )
 
 with tab_jobs:
@@ -2331,3 +2336,269 @@ with tab_allocations:
         st.dataframe(display_pipeline_ful, width="stretch")
 
 
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# REVENUE TAB
+# ═══════════════════════════════════════════════════════════════════════════════
+with tab_revenue:
+    st.subheader("Revenue Accrual")
+
+    LOB_LABEL = "Rockies (WT-CO)"
+    REVENUE_REGION = "RM"   # Rockies region code
+
+    # ── Month / year selector ─────────────────────────────────────────────────
+    today = date.today()
+    rc1, rc2, rc3 = st.columns([1, 1, 4])
+    rev_month = rc1.selectbox(
+        "Month",
+        list(range(1, 13)),
+        index=today.month - 1,
+        format_func=lambda m: date(2000, m, 1).strftime("%B"),
+        key="rev_month",
+    )
+    rev_year = rc2.number_input(
+        "Year", min_value=2020, max_value=2035,
+        value=today.year, step=1, key="rev_year",
+    )
+    month_label = date(int(rev_year), int(rev_month), 1).strftime("%B %Y")
+
+    st.divider()
+
+    # ── Load jobs for this region / month ─────────────────────────────────────
+    rev_jobs = get_revenue_jobs_df(engine, REVENUE_REGION, int(rev_month), int(rev_year))
+
+    if rev_jobs.empty:
+        st.info(f"No active Rockies jobs found for {month_label}. Create jobs in the Jobs tab with region **RM – Rockies**.")
+    else:
+        # ── Summary metrics bar ───────────────────────────────────────────────
+        all_li = get_line_items_df(engine)
+        job_ids = rev_jobs["id"].tolist()
+        month_li = all_li[all_li["job_id"].isin(job_ids)] if not all_li.empty else pd.DataFrame()
+
+        total_revenue = 0.0
+        if not month_li.empty:
+            for _, li in month_li.iterrows():
+                lt = None
+                if li.get("line_total") is not None and not pd.isna(li["line_total"]):
+                    lt = float(li["line_total"])
+                else:
+                    qty = li.get("invoice_qty")
+                    price = li.get("unit_price")
+                    if qty is not None and price is not None and not pd.isna(qty) and not pd.isna(price):
+                        lt = float(qty) * float(price)
+                if lt:
+                    total_revenue += lt
+
+        m1, m2, m3 = st.columns(3)
+        m1.metric("Active Jobs", len(rev_jobs))
+        m2.metric("Total Revenue", f"${total_revenue:,.2f}")
+        m3.metric("Customers", rev_jobs["customer"].nunique())
+
+        st.divider()
+
+        # ── Job selector ──────────────────────────────────────────────────────
+        rev_jobs["_display"] = (
+            rev_jobs["customer"].fillna("—") + "  |  " +
+            rev_jobs["job_name"] + "  |  " + rev_jobs["job_code"]
+        )
+        rev_job_ids = rev_jobs["id"].tolist()
+
+        rev_sel_key = f"rev_selected_job_id_{REVENUE_REGION}"
+        if rev_sel_key not in st.session_state or st.session_state[rev_sel_key] not in rev_job_ids:
+            st.session_state[rev_sel_key] = int(rev_job_ids[0])
+
+        selected_rev_job_id = st.selectbox(
+            "Select Job to Edit",
+            rev_job_ids,
+            format_func=lambda jid: rev_jobs.loc[rev_jobs["id"] == jid, "_display"].iloc[0],
+            key=rev_sel_key,
+        )
+        sel_job = rev_jobs.loc[rev_jobs["id"] == selected_rev_job_id].iloc[0]
+        sel_fill = str(sel_job.get("customer_color", "") or "") or customer_base_color(
+            str(sel_job.get("customer", "Unassigned") or "Unassigned")
+        )
+        st.markdown(
+            highlight_cell_html(
+                f"{str(sel_job.get('customer','') or '—')}  |  "
+                f"{sel_job['job_name']}  |  {sel_job['job_code']}",
+                sel_fill, bold=True,
+            ),
+            unsafe_allow_html=True,
+        )
+
+        # ── Billing fields ────────────────────────────────────────────────────
+        st.markdown("##### Billing Info")
+        bf1, bf2, bf3, bf4, bf5 = st.columns([1.5, 1.5, 1.5, 1.2, 0.8])
+        b_company_man    = bf1.text_input("Company Man",    value=str(sel_job.get("company_man",     "") or ""), key=f"rev_cm_{selected_rev_job_id}")
+        b_invoice_number = bf2.text_input("Invoice #",     value=str(sel_job.get("invoice_number",  "") or ""), key=f"rev_inv_{selected_rev_job_id}")
+        b_so_ticket      = bf3.text_input("SO / Ticket #", value=str(sel_job.get("so_ticket_number","") or ""), key=f"rev_so_{selected_rev_job_id}")
+        b_day_rate_raw   = sel_job.get("day_rate")
+        b_day_rate       = bf4.number_input(
+            "Day Rate ($)", min_value=0.0,
+            value=float(b_day_rate_raw) if b_day_rate_raw is not None and not pd.isna(b_day_rate_raw) else 0.0,
+            step=0.01, format="%.2f", key=f"rev_dr_{selected_rev_job_id}",
+        )
+        b_accrue_raw = sel_job.get("accrue")
+        b_accrue = bf5.checkbox(
+            "Accrue",
+            value=bool(b_accrue_raw) if b_accrue_raw is not None else False,
+            key=f"rev_accrue_{selected_rev_job_id}",
+        )
+
+        if st.button("💾 Save Billing Info", key=f"rev_save_billing_{selected_rev_job_id}"):
+            update_job_billing(engine, int(selected_rev_job_id), {
+                "company_man":      b_company_man,
+                "invoice_number":   b_invoice_number,
+                "so_ticket_number": b_so_ticket,
+                "day_rate":         float(b_day_rate),
+                "accrue":           bool(b_accrue),
+            })
+            st.success("Billing info saved.")
+            st.rerun()
+
+        st.divider()
+
+        # ── Line item editor ──────────────────────────────────────────────────
+        st.markdown("##### Line Items")
+
+        existing_li = get_line_items_df(engine, job_id=int(selected_rev_job_id))
+
+        UOM_OPTIONS = ["Day", "Ea", "Gal", "BBL", "MMBTU", "Ton", "Hour", "Month", "Ft", "Mile", ""]
+
+        if existing_li.empty:
+            editor_base = pd.DataFrame({
+                "Description": [""] * 5,
+                "UOM":         ["Day"] * 5,
+                "Start":       [None] * 5,
+                "End":         [None] * 5,
+                "Invoice Qty": [None] * 5,
+                "Unit Price":  [None] * 5,
+                "Line Total":  [None] * 5,
+                "Notes":       [""] * 5,
+            })
+        else:
+            editor_base = pd.DataFrame({
+                "Description": existing_li["description"].fillna("").tolist(),
+                "UOM":         existing_li["uom"].fillna("").tolist(),
+                "Start":       pd.to_datetime(existing_li["start_date"], errors="coerce").dt.date.tolist(),
+                "End":         pd.to_datetime(existing_li["end_date"],   errors="coerce").dt.date.tolist(),
+                "Invoice Qty": existing_li["invoice_qty"].tolist(),
+                "Unit Price":  existing_li["unit_price"].tolist(),
+                "Line Total":  existing_li["line_total"].tolist(),
+                "Notes":       existing_li["notes"].fillna("").tolist(),
+            })
+
+        li_reset_key = f"rev_li_reset_{selected_rev_job_id}"
+        if li_reset_key not in st.session_state:
+            st.session_state[li_reset_key] = 0
+        li_editor_key = f"rev_li_editor_{selected_rev_job_id}_{st.session_state[li_reset_key]}"
+
+        edited_li = st.data_editor(
+            editor_base,
+            num_rows="dynamic",
+            hide_index=True,
+            key=li_editor_key,
+            column_config={
+                "Description": st.column_config.TextColumn("Description", width="large"),
+                "UOM":         st.column_config.SelectboxColumn("UOM", options=UOM_OPTIONS, width="small"),
+                "Start":       st.column_config.DateColumn("Start", format="MM/DD/YYYY", width="medium"),
+                "End":         st.column_config.DateColumn("End",   format="MM/DD/YYYY", width="medium"),
+                "Invoice Qty": st.column_config.NumberColumn("Invoice Qty", format="%.2f", width="small"),
+                "Unit Price":  st.column_config.NumberColumn("Unit Price ($)", format="%.4f", width="medium"),
+                "Line Total":  st.column_config.NumberColumn("Line Total ($)", format="%.2f", width="medium"),
+                "Notes":       st.column_config.TextColumn("Notes", width="medium"),
+            },
+            width="stretch",
+        )
+
+        st.caption(
+            "💡 Leave **Line Total** blank to auto-calculate from Qty × Price on export. "
+            "Enter it directly to override (e.g. fuel estimates)."
+        )
+
+        if st.button("💾 Save Line Items", type="primary", key=f"rev_save_li_{selected_rev_job_id}"):
+            rows_to_save = []
+            for _, r in edited_li.iterrows():
+                desc = str(r.get("Description", "") or "").strip()
+                if not desc:
+                    continue
+                rows_to_save.append({
+                    "description": desc,
+                    "uom":         str(r.get("UOM", "") or ""),
+                    "start_date":  r.get("Start"),
+                    "end_date":    r.get("End"),
+                    "invoice_qty": r.get("Invoice Qty"),
+                    "unit_price":  r.get("Unit Price"),
+                    "line_total":  r.get("Line Total"),
+                    "notes":       str(r.get("Notes", "") or ""),
+                })
+            save_line_items(engine, int(selected_rev_job_id), rows_to_save)
+            st.session_state[li_reset_key] += 1
+            st.success(f"Saved {len(rows_to_save)} line item(s).")
+            st.rerun()
+
+        # ── Line item preview for selected job ────────────────────────────────
+        preview_li = get_line_items_df(engine, job_id=int(selected_rev_job_id))
+        if not preview_li.empty:
+            st.markdown("**Saved Line Items**")
+            disp = preview_li[["line_number", "description", "uom",
+                                "start_date", "end_date",
+                                "invoice_qty", "unit_price", "line_total"]].copy()
+            disp.columns = ["#", "Description", "UOM", "Start", "End",
+                            "Qty", "Unit Price", "Line Total"]
+            disp["Start"] = pd.to_datetime(disp["Start"], errors="coerce").dt.strftime("%m/%d/%Y").fillna("")
+            disp["End"]   = pd.to_datetime(disp["End"],   errors="coerce").dt.strftime("%m/%d/%Y").fillna("")
+            for col in ["Qty", "Unit Price", "Line Total"]:
+                disp[col] = disp[col].apply(lambda v: f"${float(v):,.2f}" if pd.notna(v) and v != "" else "")
+            st.dataframe(disp, hide_index=True, use_container_width=True)
+
+        st.divider()
+
+        # ── All jobs summary table ────────────────────────────────────────────
+        st.markdown(f"##### All Rockies Jobs — {month_label}")
+        all_li_for_month = get_line_items_df(engine)
+        summary_rows = []
+        for _, j in rev_jobs.iterrows():
+            jli = all_li_for_month[all_li_for_month["job_id"] == j["id"]] if not all_li_for_month.empty else pd.DataFrame()
+            jt = 0.0
+            for _, li in jli.iterrows():
+                lt = li.get("line_total")
+                if lt is not None and not pd.isna(lt):
+                    jt += float(lt)
+                else:
+                    qty = li.get("invoice_qty")
+                    price = li.get("unit_price")
+                    if qty is not None and price is not None and not pd.isna(qty) and not pd.isna(price):
+                        jt += float(qty) * float(price)
+            summary_rows.append({
+                "Job Code":    j["job_code"],
+                "Job Name":    j["job_name"],
+                "Customer":    str(j.get("customer", "") or "—"),
+                "Company Man": str(j.get("company_man", "") or "—"),
+                "Invoice #":   str(j.get("invoice_number", "") or "—"),
+                "Day Rate":    f"${float(j['day_rate']):,.2f}" if j.get("day_rate") and not pd.isna(j["day_rate"]) else "—",
+                "Job Total":   f"${jt:,.2f}",
+                "Accrue":      "✓" if j.get("accrue") else "",
+            })
+        st.dataframe(pd.DataFrame(summary_rows), hide_index=True, use_container_width=True)
+
+        st.divider()
+
+        # ── Excel export ──────────────────────────────────────────────────────
+        st.markdown("##### Export Revenue Report")
+        if st.button("📊 Generate Excel Report", key="rev_generate_excel"):
+            all_li_export = get_line_items_df(engine)
+            li_for_export = all_li_export[all_li_export["job_id"].isin(job_ids)] if not all_li_export.empty else pd.DataFrame()
+            xlsx_bytes = build_revenue_excel(
+                jobs_df=rev_jobs,
+                line_items_df=li_for_export,
+                lob_label=LOB_LABEL,
+                month_label=month_label,
+            )
+            st.download_button(
+                label=f"⬇️  Download {month_label} Revenue Report",
+                data=xlsx_bytes,
+                file_name=f"Revenue_{LOB_LABEL.replace(' ','_')}_{month_label.replace(' ','_')}.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                key="rev_download_xlsx",
+            )
