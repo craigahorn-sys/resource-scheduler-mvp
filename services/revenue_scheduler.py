@@ -409,9 +409,8 @@ def _fmt(val) -> str:
 
 def build_ticket_excel(job: dict, line_items_df) -> bytes:
     """
-    Fills the 2025_Ticket_Sample.xlsx template with job data and returns bytes.
-    The template must exist in the repo root (same level as app.py).
-    Raises FileNotFoundError with a clear message if template is missing.
+    Loads 2025_Ticket_Sample.xlsx from repo root, clears data cells,
+    writes job data, and explicitly sets =G*B formulas in H13:H30.
     """
     from io import BytesIO
     from pathlib import Path
@@ -419,7 +418,6 @@ def build_ticket_excel(job: dict, line_items_df) -> bytes:
 
     DOLLAR_FMT = "$#,##0.00"
 
-    # ── Locate template (repo root, one level above services/) ───────────────
     template_path = Path(__file__).resolve().parent.parent / "2025_Ticket_Sample.xlsx"
     if not template_path.exists():
         raise FileNotFoundError(
@@ -430,7 +428,7 @@ def build_ticket_excel(job: dict, line_items_df) -> bytes:
     wb = load_workbook(template_path)
     ws = wb.active
 
-    # ── Clear data cells only (preserves all formatting, borders, formulas) ──
+    # ── Clear data cells (preserves all formatting, static text, borders) ────
     cells_to_clear = (
         ["H1", "B11"] +
         [f"C{r}" for r in range(6, 11)] +
@@ -438,7 +436,8 @@ def build_ticket_excel(job: dict, line_items_df) -> bytes:
         [f"B{r}" for r in range(13, 31)] +
         [f"C{r}" for r in range(13, 31)] +
         [f"D{r}" for r in range(13, 31)] +
-        [f"G{r}" for r in range(13, 31)]
+        [f"G{r}" for r in range(13, 31)] +
+        [f"H{r}" for r in range(13, 31)]   # clear H too — we rewrite all formulas below
     )
     for coord in cells_to_clear:
         try:
@@ -453,35 +452,32 @@ def build_ticket_excel(job: dict, line_items_df) -> bytes:
     ws["C8"].value  = str(job.get("customer_po",      "") or "")
     ws["C9"].value  = str(job.get("county_state",     "") or "")
     ws["C10"].value = str(job.get("location",         "") or "")
+    ws["F6"].value  = str(job.get("job_start_date",   "") or "")
+    ws["F7"].value  = str(job.get("well_name",        "") or "")
+    ws["F8"].value  = str(job.get("well_number",      "") or "")
+    ws["F9"].value  = str(job.get("ordered_by",       "") or "")
+    ws["F10"].value = str(job.get("department",       "") or "")
+    ws["B11"].value = str(job.get("job_description",  "") or "")
 
-    svc_date = job.get("job_start_date")
-    ws["F6"].value  = str(svc_date) if svc_date else ""
-    ws["F7"].value  = str(job.get("well_name",    "") or "")
-    ws["F8"].value  = str(job.get("well_number",  "") or "")
-    ws["F9"].value  = str(job.get("ordered_by",   "") or "")
-    ws["F10"].value = str(job.get("department",   "") or "")
-    ws["B11"].value = str(job.get("job_description", "") or "")
-
-    # ── Line items (B=qty, C=uom, D=description, G=unit price) ──────────────
-    # H column keeps =G*B formulas from the template — do not touch
+    # ── Line items ────────────────────────────────────────────────────────────
     items = line_items_df.to_dict("records") if not line_items_df.empty else []
-    for i in range(18):
+    for i in range(18):  # rows 13–30
         row = 13 + i
         if i < len(items):
             li = items[i]
             ws[f"B{row}"].value = _num(li.get("invoice_qty"))
             ws[f"C{row}"].value = str(li.get("uom", "") or "")
             ws[f"D{row}"].value = str(li.get("description", "") or "")
-            price = _num(li.get("unit_price"))
-            ws[f"G{row}"].value = price
+            ws[f"G{row}"].value = _num(li.get("unit_price"))
 
-    # ── Dollar formatting on G13:G30 and H13:H31 ────────────────────────────
-    for r in range(13, 32):
-        for col in ["G", "H"]:
-            try:
-                ws[f"{col}{r}"].number_format = DOLLAR_FMT
-            except Exception:
-                pass
+        # Write =G*B formula in H for every row 13-30, whether data or empty
+        ws[f"H{row}"].value = f"=G{row}*B{row}"
+        ws[f"H{row}"].number_format = DOLLAR_FMT
+
+    # ── Dollar formatting on G13:G30 and H31 ─────────────────────────────────
+    for r in range(13, 31):
+        ws[f"G{r}"].number_format = DOLLAR_FMT
+    ws["H31"].number_format = DOLLAR_FMT
 
     out = BytesIO()
     wb.save(out)
