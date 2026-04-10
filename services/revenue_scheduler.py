@@ -409,78 +409,63 @@ def _fmt(val) -> str:
 
 def build_ticket_excel(job: dict, line_items_df) -> bytes:
     """
-    Fills the Elevate Energy Services field ticket template with job data.
-    Loads the template from the repo, clears data cells, writes job values.
-    Falls back to a basic workbook if the template file is not found.
+    Fills the 2025_Ticket_Sample.xlsx template with job data and returns bytes.
+    The template must exist in the repo root (same level as app.py).
+    Raises FileNotFoundError with a clear message if template is missing.
     """
     from io import BytesIO
     from pathlib import Path
     from openpyxl import load_workbook
-    from openpyxl.styles import numbers as xl_numbers
 
     DOLLAR_FMT = "$#,##0.00"
 
-    # ── Locate template ───────────────────────────────────────────────────────
-    # Template lives at repo root: 2025_Ticket_Sample.xlsx
+    # ── Locate template (repo root, one level above services/) ───────────────
     template_path = Path(__file__).resolve().parent.parent / "2025_Ticket_Sample.xlsx"
     if not template_path.exists():
-        # Try same directory as this file
-        template_path = Path(__file__).resolve().parent / "2025_Ticket_Sample.xlsx"
+        raise FileNotFoundError(
+            f"Field ticket template not found at {template_path}. "
+            "Please add '2025_Ticket_Sample.xlsx' to the repo root."
+        )
 
     wb = load_workbook(template_path)
     ws = wb.active
 
-    # ── Clear the sample data cells (keep all formatting/formulas intact) ─────
-    # Header fields that will be replaced
-    data_cells_to_clear = [
-        "H1",           # SO number
-        "C6", "D6",     # Customer name value (merged)
-        "F6", "G6", "H6",  # Date of service value (merged)
-        "C7", "D7",     # EES Supervisor value
-        "F7", "G7", "H7",  # Well name value
-        "C8", "D8",     # Customer PO value
-        "F8", "G8", "H8",  # Well number value
-        "C9", "D9",     # County/state value
-        "F9", "G9", "H9",  # Ordered by value
-        "C10", "D10",   # Location value
-        "F10", "G10", "H10",  # Department value
-        "B11",          # Job description value
-    ]
-    # Line item data cells B13:B30 and G13:G30 (H keeps formulas)
-    for r in range(13, 31):
-        data_cells_to_clear += [f"B{r}", f"C{r}", f"D{r}", f"G{r}"]
-
-    for coord in data_cells_to_clear:
+    # ── Clear data cells only (preserves all formatting, borders, formulas) ──
+    cells_to_clear = (
+        ["H1", "B11"] +
+        [f"C{r}" for r in range(6, 11)] +
+        [f"F{r}" for r in range(6, 11)] +
+        [f"B{r}" for r in range(13, 31)] +
+        [f"C{r}" for r in range(13, 31)] +
+        [f"D{r}" for r in range(13, 31)] +
+        [f"G{r}" for r in range(13, 31)]
+    )
+    for coord in cells_to_clear:
         try:
             ws[coord].value = None
         except Exception:
             pass
 
-    # ── Write job header fields ───────────────────────────────────────────────
-    ws["H1"].value = str(job.get("so_ticket_number", "") or "")
+    # ── Header fields ─────────────────────────────────────────────────────────
+    ws["H1"].value  = str(job.get("so_ticket_number", "") or "")
+    ws["C6"].value  = str(job.get("customer",         "") or "")
+    ws["C7"].value  = str(job.get("ees_supervisor",   "") or "")
+    ws["C8"].value  = str(job.get("customer_po",      "") or "")
+    ws["C9"].value  = str(job.get("county_state",     "") or "")
+    ws["C10"].value = str(job.get("location",         "") or "")
 
-    # Left column values
-    ws["C6"].value = str(job.get("customer", "") or "")
-    ws["C7"].value = str(job.get("ees_supervisor", "") or "")
-    ws["C8"].value = str(job.get("customer_po", "") or "")
-    ws["C9"].value = str(job.get("county_state", "") or "")
-    ws["C10"].value = str(job.get("location", "") or "")
-
-    # Right column values
     svc_date = job.get("job_start_date")
-    ws["F6"].value = str(svc_date) if svc_date else ""
-    ws["F7"].value = str(job.get("well_name", "") or "")
-    ws["F8"].value = str(job.get("well_number", "") or "")
-    ws["F9"].value = str(job.get("ordered_by", "") or "")
-    ws["F10"].value = str(job.get("department", "") or "")
-
-    # Job description
+    ws["F6"].value  = str(svc_date) if svc_date else ""
+    ws["F7"].value  = str(job.get("well_name",    "") or "")
+    ws["F8"].value  = str(job.get("well_number",  "") or "")
+    ws["F9"].value  = str(job.get("ordered_by",   "") or "")
+    ws["F10"].value = str(job.get("department",   "") or "")
     ws["B11"].value = str(job.get("job_description", "") or "")
 
-    # ── Write line items ──────────────────────────────────────────────────────
+    # ── Line items (B=qty, C=uom, D=description, G=unit price) ──────────────
+    # H column keeps =G*B formulas from the template — do not touch
     items = line_items_df.to_dict("records") if not line_items_df.empty else []
-
-    for i in range(18):  # rows 13–30
+    for i in range(18):
         row = 13 + i
         if i < len(items):
             li = items[i]
@@ -489,21 +474,14 @@ def build_ticket_excel(job: dict, line_items_df) -> bytes:
             ws[f"D{row}"].value = str(li.get("description", "") or "")
             price = _num(li.get("unit_price"))
             ws[f"G{row}"].value = price
-            if price is not None:
-                ws[f"G{row}"].number_format = DOLLAR_FMT
 
-        # H column keeps its =G*B formula from the template — no changes needed
-
-    # Ensure G and H columns have dollar formatting on all data rows
+    # ── Dollar formatting on G13:G30 and H13:H31 ────────────────────────────
     for r in range(13, 32):
-        try:
-            ws[f"G{r}"].number_format = DOLLAR_FMT
-        except Exception:
-            pass
-        try:
-            ws[f"H{r}"].number_format = DOLLAR_FMT
-        except Exception:
-            pass
+        for col in ["G", "H"]:
+            try:
+                ws[f"{col}{r}"].number_format = DOLLAR_FMT
+            except Exception:
+                pass
 
     out = BytesIO()
     wb.save(out)
