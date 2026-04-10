@@ -12,7 +12,7 @@ from services.models import calc_job_dates
 from services.revenue_scheduler import (
     migrate_revenue_columns, update_job_billing,
     get_line_items_df, save_line_items, delete_line_item,
-    get_revenue_jobs_df, build_revenue_excel,
+    get_revenue_jobs_df, build_revenue_excel, build_ticket_excel,
 )
 from services.scheduler import (
     add_pool_adjustment, allocation_debug_df, create_job, create_requirement, delete_job,
@@ -2428,6 +2428,7 @@ with tab_revenue:
 
         # ── Billing fields ────────────────────────────────────────────────────
         st.markdown("##### Billing Info")
+        # Row 1: Invoice / billing fields
         bf1, bf2, bf3, bf4, bf5 = st.columns([1.5, 1.5, 1.5, 1.2, 0.8])
         b_company_man    = bf1.text_input("Company Man",    value=str(sel_job.get("company_man",     "") or ""), key=f"rev_cm_{selected_rev_job_id}")
         b_invoice_number = bf2.text_input("Invoice #",     value=str(sel_job.get("invoice_number",  "") or ""), key=f"rev_inv_{selected_rev_job_id}")
@@ -2445,6 +2446,24 @@ with tab_revenue:
             key=f"rev_accrue_{selected_rev_job_id}",
         )
 
+        # Row 2: Field ticket fields
+        tf1, tf2, tf3, tf4 = st.columns(4)
+        b_ees_supervisor = tf1.text_input("EES Supervisor", value=str(sel_job.get("ees_supervisor", "") or ""), key=f"rev_sup_{selected_rev_job_id}")
+        b_customer_po    = tf2.text_input("Customer PO",    value=str(sel_job.get("customer_po",    "") or ""), key=f"rev_po_{selected_rev_job_id}")
+        b_county_state   = tf3.text_input("County & State", value=str(sel_job.get("county_state",   "") or ""), key=f"rev_cs_{selected_rev_job_id}")
+        b_ordered_by     = tf4.text_input("Ordered By",     value=str(sel_job.get("ordered_by",     "") or ""), key=f"rev_ob_{selected_rev_job_id}")
+
+        tf5, tf6, tf7 = st.columns(3)
+        b_well_name      = tf5.text_input("Well Name",      value=str(sel_job.get("well_name",      "") or ""), key=f"rev_wn_{selected_rev_job_id}")
+        b_well_number    = tf6.text_input("Well Number",    value=str(sel_job.get("well_number",    "") or ""), key=f"rev_wnr_{selected_rev_job_id}")
+        b_department     = tf7.text_input("Department",     value=str(sel_job.get("department",     "") or ""), key=f"rev_dept_{selected_rev_job_id}")
+
+        b_job_description = st.text_input(
+            'Job Description (appears on ticket, e.g. 6'' Layflat Rental)',
+            value=str(sel_job.get("job_description", "") or ""),
+            key=f"rev_jd_{selected_rev_job_id}",
+        )
+
         if st.button("💾 Save Billing Info", key=f"rev_save_billing_{selected_rev_job_id}"):
             update_job_billing(engine, int(selected_rev_job_id), {
                 "company_man":      b_company_man,
@@ -2452,6 +2471,14 @@ with tab_revenue:
                 "so_ticket_number": b_so_ticket,
                 "day_rate":         float(b_day_rate),
                 "accrue":           bool(b_accrue),
+                "ees_supervisor":   b_ees_supervisor,
+                "customer_po":      b_customer_po,
+                "county_state":     b_county_state,
+                "well_name":        b_well_name,
+                "well_number":      b_well_number,
+                "ordered_by":       b_ordered_by,
+                "department":       b_department,
+                "job_description":  b_job_description,
             })
             st.success("Billing info saved.")
             st.rerun()
@@ -2581,6 +2608,22 @@ with tab_revenue:
                 "Accrue":      "✓" if j.get("accrue") else "",
             })
         st.dataframe(pd.DataFrame(summary_rows), hide_index=True, use_container_width=True)
+
+        st.divider()
+
+        # ── Field Ticket download ─────────────────────────────────────────────
+        st.markdown("##### Field Ticket")
+        ticket_li = get_line_items_df(engine, job_id=int(selected_rev_job_id))
+        ticket_bytes = build_ticket_excel(sel_job.to_dict(), ticket_li)
+        job_code_safe = str(sel_job.get("job_code", "job")).replace("/", "-")
+        st.download_button(
+            label="📋  Download Field Ticket",
+            data=ticket_bytes,
+            file_name=f"FieldTicket_{job_code_safe}.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            key=f"rev_ticket_dl_{selected_rev_job_id}",
+        )
+        st.caption("Ticket pre-fills from saved billing info and line items above.")
 
         st.divider()
 

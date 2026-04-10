@@ -32,6 +32,15 @@ CREATE TABLE IF NOT EXISTS jobs (
     so_ticket_number TEXT,
     day_rate NUMERIC,
     accrue BOOLEAN NOT NULL DEFAULT FALSE,
+    -- Field ticket fields
+    ees_supervisor TEXT,
+    customer_po TEXT,
+    county_state TEXT,
+    well_name TEXT,
+    well_number TEXT,
+    ordered_by TEXT,
+    department TEXT,
+    job_description TEXT,
     created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
