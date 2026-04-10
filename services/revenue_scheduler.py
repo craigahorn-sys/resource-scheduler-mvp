@@ -554,68 +554,44 @@ def build_ticket_excel(job: dict, line_items_df) -> bytes:
     # ── Rows 13-30: Line items ────────────────────────────────────────────────
     MAX_LINES = 18
     items = line_items_df.to_dict("records") if not line_items_df.empty else []
-    grand_total = 0.0
 
-    # Merge D:F for all 18 line item rows up front (before writing values)
+    # Merge D:F for all line item rows first, then write values
     for i in range(MAX_LINES):
         _merge(13 + i, 4, 13 + i, 6)
 
     for i in range(MAX_LINES):
         row = 13 + i
 
-        if i < len(items):
-            li = items[i]
-            qty   = _num(li.get("invoice_qty"))
-            price = _num(li.get("unit_price"))
-            stored_total = _num(li.get("line_total"))
-            desc  = str(li.get("description", "") or "")
-            uom   = str(li.get("uom", "") or "")
+        # B: Qty
+        c = ws.cell(row=row, column=2, value=items[i].get("invoice_qty") if i < len(items) else None)
+        qty_val = _num(items[i].get("invoice_qty")) if i < len(items) else None
+        c.value = qty_val
+        c.font = _f(); c.border = thin_border
+        c.alignment = _a(h="center", v="center")
+        c.number_format = "0.##"
 
-            # Compute line total
-            if stored_total is not None:
-                line_total_val = stored_total
-            elif qty is not None and price is not None:
-                line_total_val = qty * price
-            else:
-                line_total_val = None
-            if line_total_val is not None:
-                grand_total += line_total_val
+        # C: UOM
+        c = ws.cell(row=row, column=3, value=str(items[i].get("uom", "") or "") if i < len(items) else None)
+        c.font = _f(); c.border = thin_border
+        c.alignment = _a(h="center", v="center")
 
-            # B: Qty
-            c = ws.cell(row=row, column=2, value=qty)
-            c.font = _f(); c.border = thin_border
-            c.alignment = _a(h="center", v="center")
+        # D: Description (top-left of merged D:F)
+        c = ws.cell(row=row, column=4, value=str(items[i].get("description", "") or "") if i < len(items) else None)
+        c.font = _f(); c.border = thin_border
+        c.alignment = _a(h="left", v="center")
 
-            # C: UOM
-            c = ws.cell(row=row, column=3, value=uom)
-            c.font = _f(); c.border = thin_border
-            c.alignment = _a(h="center", v="center")
+        # G: Unit Price
+        price_val = _num(items[i].get("unit_price")) if i < len(items) else None
+        c = ws.cell(row=row, column=7, value=price_val)
+        c.font = _f(); c.border = thin_border
+        c.alignment = _a(h="right", v="center")
+        c.number_format = "$#,##0.00"
 
-            # D: Description (merged D:F — write to top-left cell only)
-            c = ws.cell(row=row, column=4, value=desc)
-            c.font = _f(); c.border = thin_border
-            c.alignment = _a(h="left", v="center")
-
-            # G: Unit Price
-            c = ws.cell(row=row, column=7, value=price)
-            c.font = _f(); c.border = thin_border
-            c.alignment = _a(h="right", v="center")
-            c.number_format = "$#,##0.00"
-
-            # H: Amount — store calculated value; Excel formula for live editing
-            c = ws.cell(row=row, column=8, value=line_total_val)
-            c.font = _f(); c.border = thin_border
-            c.alignment = _a(h="right", v="center")
-            c.number_format = "$#,##0.00"
-
-        else:
-            # Empty row — borders + dollar formatting, no values
-            for col, num_fmt in [(2, "General"), (3, "General"),
-                                  (4, "General"), (7, "$#,##0.00"),
-                                  (8, "$#,##0.00")]:
-                c = ws.cell(row=row, column=col, value=None)
-                c.font = _f(); c.border = thin_border
-                c.number_format = num_fmt
+        # H: Amount — always a formula =B*G, Excel calculates it
+        c = ws.cell(row=row, column=8, value=f"=B{row}*G{row}")
+        c.font = _f(); c.border = thin_border
+        c.alignment = _a(h="right", v="center")
+        c.number_format = "$#,##0.00"
 
     # ── Row 31: Total ─────────────────────────────────────────────────────────
     _merge(31, 1, 31, 6)
@@ -626,9 +602,9 @@ def build_ticket_excel(job: dict, line_items_df) -> bytes:
     c.alignment = _a(h="left", v="center")
 
     _set("G31", "TOTAL", bold=True, size=10, h="left", border=thin_border)
-    # Pre-calculated total — shows without LibreOffice recalc
+    # H31: SUM of all amount formulas
     c = ws["H31"]
-    c.value = grand_total
+    c.value = "=SUM(H13:H30)"
     c.font = _f(bold=True, size=11)
     c.border = thin_border
     c.number_format = "$#,##0.00"
