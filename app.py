@@ -2614,16 +2614,23 @@ with tab_revenue:
         # ── Field Ticket download ─────────────────────────────────────────────
         st.markdown("##### Field Ticket")
         ticket_li = get_line_items_df(engine, job_id=int(selected_rev_job_id))
-        ticket_bytes = build_ticket_excel(sel_job.to_dict(), ticket_li)
         job_code_safe = str(sel_job.get("job_code", "job")).replace("/", "-")
-        st.download_button(
-            label="📋  Download Field Ticket",
-            data=ticket_bytes,
-            file_name=f"FieldTicket_{job_code_safe}.xlsx",
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            key=f"rev_ticket_dl_{selected_rev_job_id}",
-        )
-        st.caption("Ticket pre-fills from saved billing info and line items above.")
+        try:
+            ticket_bytes = build_ticket_excel(sel_job.to_dict(), ticket_li)
+            st.download_button(
+                label="📋  Download Field Ticket",
+                data=ticket_bytes,
+                file_name=f"FieldTicket_{job_code_safe}.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                key=f"rev_ticket_dl_{selected_rev_job_id}",
+            )
+            st.caption("Ticket pre-fills from saved billing info and line items above.")
+        except FileNotFoundError:
+            st.warning(
+                "⚠️ Field ticket template not found. "
+                "Add **2025_Ticket_Sample.xlsx** to the repo root to enable ticket downloads.",
+                icon="📄",
+            )
 
         st.divider()
 
