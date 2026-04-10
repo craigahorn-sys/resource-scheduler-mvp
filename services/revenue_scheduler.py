@@ -554,6 +554,7 @@ def build_ticket_excel(job: dict, line_items_df) -> bytes:
     # ── Rows 13-30: Line items ────────────────────────────────────────────────
     MAX_LINES = 18
     items = line_items_df.to_dict("records") if not line_items_df.empty else []
+    grand_total = 0.0
 
     for i in range(MAX_LINES):
         row = 13 + i
@@ -566,6 +567,8 @@ def build_ticket_excel(job: dict, line_items_df) -> bytes:
             total = _num(li.get("line_total"))
             if total is None and qty is not None and price is not None:
                 total = qty * price
+            if total is not None:
+                grand_total += total
             desc = str(li.get("description", "") or "")
             uom  = str(li.get("uom", "") or "")
 
@@ -585,14 +588,17 @@ def build_ticket_excel(job: dict, line_items_df) -> bytes:
             c.font = _f(); c.border = thin_border
             c.alignment = _a(h="center", v="center")
         else:
-            # Empty bordered row
-            for col in [2, 3, 8]:
-                c = ws.cell(row=row, column=col)
+            # Empty bordered rows — write empty string so openpyxl renders the row
+            for col in [1, 2, 3, 7, 8]:
+                c = ws.cell(row=row, column=col, value="")
                 c.border = thin_border
+                c.font = _f()
             c = ws["D" + str(row)]
+            c.value = ""
             c.border = thin_border
+            c.font = _f()
 
-        # Apply border to merged D:F cell
+        # Border on the merged D:F description cell
         ws.cell(row=row, column=4).border = thin_border
 
     # ── Row 31: Total ─────────────────────────────────────────────────────────
@@ -604,9 +610,9 @@ def build_ticket_excel(job: dict, line_items_df) -> bytes:
     c.alignment = _a(h="left", v="center")
 
     _set("G31", "TOTAL", bold=True, size=10, h="left", border=thin_border)
-    # SUM formula for amounts
+    # Use pre-calculated total so the value shows without LibreOffice recalc
     c = ws["H31"]
-    c.value = f"=SUM(H13:H30)"
+    c.value = grand_total
     c.font = _f(bold=True, size=11)
     c.border = thin_border
     c.number_format = "#,##0.00"
