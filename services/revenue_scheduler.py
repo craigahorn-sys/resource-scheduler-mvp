@@ -564,39 +564,66 @@ def build_ticket_excel(job: dict, line_items_df) -> bytes:
             li = items[i]
             qty = _num(li.get("invoice_qty"))
             price = _num(li.get("unit_price"))
-            total = _num(li.get("line_total"))
-            if total is None and qty is not None and price is not None:
-                total = qty * price
-            if total is not None:
-                grand_total += total
+            stored_total = _num(li.get("line_total"))
             desc = str(li.get("description", "") or "")
             uom  = str(li.get("uom", "") or "")
 
-            for col, val, fmt, h in [
-                (2, qty,   "0.##",     "center"),
-                (3, uom,   None,       "center"),
-                (7, price, "#,##0.00", "right"),
-                (8, total, "#,##0.00", "right"),
-            ]:
-                c = ws.cell(row=row, column=col, value=val)
-                c.font = _f(); c.border = thin_border
-                c.alignment = _a(h=h, v="center")
-                if fmt and val is not None: c.number_format = fmt
+            # QTY (col B=2)
+            c = ws.cell(row=row, column=2, value=qty)
+            c.font = _f(); c.border = thin_border
+            c.alignment = _a(h="center", v="center")
+            c.number_format = "0.##"
 
+            # UOM (col C=3)
+            c = ws.cell(row=row, column=3, value=uom)
+            c.font = _f(); c.border = thin_border
+            c.alignment = _a(h="center", v="center")
+
+            # Description (col D=4, merged D:F)
             c = ws["D" + str(row)]
             c.value = desc
             c.font = _f(); c.border = thin_border
             c.alignment = _a(h="center", v="center")
+
+            # Unit Price (col G=7) — always dollar format
+            c = ws.cell(row=row, column=7, value=price)
+            c.font = _f(); c.border = thin_border
+            c.alignment = _a(h="right", v="center")
+            c.number_format = "$#,##0.00"
+
+            # Amount (col H=8) — formula =B*G, pre-calculated value for display
+            # Use stored line_total if available, else B*G
+            if stored_total is not None:
+                line_total_val = stored_total
+            elif qty is not None and price is not None:
+                line_total_val = qty * price
+            else:
+                line_total_val = None
+
+            c = ws.cell(row=row, column=8, value=f"=B{row}*G{row}")
+            c.font = _f(); c.border = thin_border
+            c.alignment = _a(h="right", v="center")
+            c.number_format = "$#,##0.00"
+            # Write the pre-calculated value so it shows without recalc
+            if line_total_val is not None:
+                c.value = line_total_val
+                grand_total += line_total_val
+
         else:
-            # Empty bordered rows — write empty string so openpyxl renders the row
-            for col in [1, 2, 3, 7, 8]:
+            # Empty bordered rows — write "" so openpyxl renders the row
+            for col in [1, 2, 3]:
                 c = ws.cell(row=row, column=col, value="")
-                c.border = thin_border
-                c.font = _f()
+                c.border = thin_border; c.font = _f()
             c = ws["D" + str(row)]
-            c.value = ""
-            c.border = thin_border
-            c.font = _f()
+            c.value = ""; c.border = thin_border; c.font = _f()
+            # G: unit price — empty but dollar formatted
+            c = ws.cell(row=row, column=7, value="")
+            c.border = thin_border; c.font = _f()
+            c.number_format = "$#,##0.00"
+            # H: amount — empty but dollar formatted
+            c = ws.cell(row=row, column=8, value="")
+            c.border = thin_border; c.font = _f()
+            c.number_format = "$#,##0.00"
 
         # Border on the merged D:F description cell
         ws.cell(row=row, column=4).border = thin_border
@@ -610,12 +637,12 @@ def build_ticket_excel(job: dict, line_items_df) -> bytes:
     c.alignment = _a(h="left", v="center")
 
     _set("G31", "TOTAL", bold=True, size=10, h="left", border=thin_border)
-    # Use pre-calculated total so the value shows without LibreOffice recalc
+    # Pre-calculated total — shows without LibreOffice recalc
     c = ws["H31"]
     c.value = grand_total
     c.font = _f(bold=True, size=11)
     c.border = thin_border
-    c.number_format = "#,##0.00"
+    c.number_format = "$#,##0.00"
     c.alignment = _a(h="right", v="center")
 
     # ── Rows 32-33: Signatures ────────────────────────────────────────────────
