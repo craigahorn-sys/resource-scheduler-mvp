@@ -9,6 +9,7 @@ import streamlit as st
 
 from services.db import execute, export_excel, get_engine, init_db, query_df
 from services.models import calc_job_dates
+from services.bidding import migrate_bidding
 from services.revenue_scheduler import (
     migrate_revenue_columns, update_job_billing,
     get_line_items_df, save_line_items, delete_line_item,
@@ -84,6 +85,7 @@ st.markdown(
 engine = get_engine()
 init_db(engine)
 migrate_revenue_columns(engine)
+migrate_bidding(engine)
 
 try:
     query_df(engine, "SELECT customer_color FROM jobs LIMIT 1")
@@ -1536,8 +1538,8 @@ if "last_active_region" not in st.session_state:
 if st.session_state["last_active_region"] != ACTIVE_REGION:
     st.session_state["last_active_region"] = ACTIVE_REGION
 
-tab_jobs, tab_job_requirements, tab_planning, tab_pools, tab_requirements, tab_allocations, tab_revenue = st.tabs(
-    ["Jobs", "Job Requirements", "Planning Board", "Pools", "Requirements", "Allocations", "Revenue"]
+tab_jobs, tab_job_requirements, tab_planning, tab_pools, tab_requirements, tab_allocations, tab_revenue, tab_bidding = st.tabs(
+    ["Jobs", "Job Requirements", "Planning Board", "Pools", "Requirements", "Allocations", "Revenue", "Bidding"]
 )
 
 with tab_jobs:
@@ -2614,23 +2616,16 @@ with tab_revenue:
         # ── Field Ticket download ─────────────────────────────────────────────
         st.markdown("##### Field Ticket")
         ticket_li = get_line_items_df(engine, job_id=int(selected_rev_job_id))
+        ticket_bytes = build_ticket_excel(sel_job.to_dict(), ticket_li)
         job_code_safe = str(sel_job.get("job_code", "job")).replace("/", "-")
-        try:
-            ticket_bytes = build_ticket_excel(sel_job.to_dict(), ticket_li)
-            st.download_button(
-                label="📋  Download Field Ticket",
-                data=ticket_bytes,
-                file_name=f"FieldTicket_{job_code_safe}.xlsx",
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                key=f"rev_ticket_dl_{selected_rev_job_id}",
-            )
-            st.caption("Ticket pre-fills from saved billing info and line items above.")
-        except FileNotFoundError:
-            st.warning(
-                "⚠️ Field ticket template not found. "
-                "Add **2025_Ticket_Sample.xlsx** to the repo root to enable ticket downloads.",
-                icon="📄",
-            )
+        st.download_button(
+            label="📋  Download Field Ticket",
+            data=ticket_bytes,
+            file_name=f"FieldTicket_{job_code_safe}.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            key=f"rev_ticket_dl_{selected_rev_job_id}",
+        )
+        st.caption("Ticket pre-fills from saved billing info and line items above.")
 
         st.divider()
 
@@ -2652,3 +2647,511 @@ with tab_revenue:
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                 key="rev_download_xlsx",
             )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# BIDDING TAB — paste this block into app.py after the Revenue tab
+# Requires: from services.bidding import * at top of app.py
+# ─────────────────────────────────────────────────────────────────────────────
+
+def render_bidding_tab(engine):
+    import pandas as pd
+    import streamlit as st
+    from services.bidding import (
+        get_catalog, get_customers_with_rate_cards, get_rate_card,
+        upsert_rate_card_row, add_customer_rate_card,
+        get_bids, get_bid, get_bid_items, save_bid, save_bid_item,
+        calc_bid, bid_to_job_line_items,
+    )
+    from services.revenue_scheduler import save_line_items
+
+    BILLING_LABELS = {
+        "line_item": "Line Item",
+        "day_rate":  "Day Rate",
+        "per_bbl":   "Per BBL",
+    }
+    STATUS_OPTIONS = ["Draft", "Sent", "Won", "Lost", "Expired"]
+    MONEY = "${:,.2f}"
+
+    sub_rate, sub_bids, sub_builder = st.tabs(
+        ["📋 Rate Cards", "📁 Bids", "🔨 Bid Builder"]
+    )
+
+    # ═════════════════════════════════════════════════════════════════════════
+    # RATE CARDS TAB
+    # ═════════════════════════════════════════════════════════════════════════
+    with sub_rate:
+        st.subheader("Customer Rate Cards")
+        st.caption("Blank = not applicable / not yet priced.  "
+                   "Changes save immediately.")
+
+        customers = get_customers_with_rate_cards(engine)
+
+        col_new, col_sel = st.columns([2, 3])
+        with col_new:
+            new_cust = st.text_input("Add new customer", key="rc_new_customer",
+                                     placeholder="Customer name…")
+            if st.button("➕ Create Rate Card", key="rc_create"):
+                if new_cust.strip():
+                    add_customer_rate_card(engine, new_cust.strip())
+                    st.success(f"Rate card created for {new_cust.strip()}")
+                    st.rerun()
+
+        with col_sel:
+            selected_cust = st.selectbox(
+                "View / edit customer", customers,
+                key="rc_customer_select",
+            ) if customers else None
+
+        if not selected_cust:
+            st.info("No rate cards yet — create one above.")
+            return
+
+        rc_df = get_rate_card(engine, selected_cust)
+
+        # Group by category for display
+        categories = rc_df["category"].unique().tolist()
+
+        for cat in categories:
+            cat_df = rc_df[rc_df["category"] == cat].reset_index(drop=True)
+            with st.expander(f"**{cat}**  ({len(cat_df)} items)", expanded=False):
+                # Show column headers
+                h1, h2, h3, h4, h5 = st.columns([3, 1.2, 1.2, 1.2, 1.2])
+                h1.markdown("**Item**")
+                h2.markdown("**Setup**")
+                h3.markdown("**Day Rate**")
+                h4.markdown("**Demob**")
+                h5.markdown("**Save**")
+
+                for _, row in cat_df.iterrows():
+                    c1, c2, c3, c4, c5 = st.columns([3, 1.2, 1.2, 1.2, 1.2])
+                    ikey = f"rc_{selected_cust}_{row['item_id']}"
+
+                    c1.write(row["name"])
+
+                    # Only show inputs for applicable charge types
+                    s_val = float(row["setup_rate"]) if row["setup_rate"] is not None else None
+                    d_val = float(row["day_rate"])   if row["day_rate"]   is not None else None
+                    m_val = float(row["demob_rate"]) if row["demob_rate"] is not None else None
+
+                    s_inp = c2.number_input("", value=s_val or 0.0,
+                        min_value=0.0, step=0.01, format="%.4f",
+                        key=f"{ikey}_s",
+                        disabled=not bool(row["has_setup"]),
+                        label_visibility="collapsed")
+
+                    d_inp = c3.number_input("", value=d_val or 0.0,
+                        min_value=0.0, step=0.01, format="%.4f",
+                        key=f"{ikey}_d",
+                        disabled=not bool(row["has_day_rate"]),
+                        label_visibility="collapsed")
+
+                    m_inp = c4.number_input("", value=m_val or 0.0,
+                        min_value=0.0, step=0.01, format="%.4f",
+                        key=f"{ikey}_m",
+                        disabled=not bool(row["has_demob"]),
+                        label_visibility="collapsed")
+
+                    if c5.button("💾", key=f"{ikey}_save"):
+                        upsert_rate_card_row(
+                            engine, selected_cust, int(row["item_id"]),
+                            s_inp if row["has_setup"]    else None,
+                            d_inp if row["has_day_rate"] else None,
+                            m_inp if row["has_demob"]    else None,
+                        )
+                        st.success(f"Saved {row['name']}", icon="✓")
+                        st.rerun()
+
+    # ═════════════════════════════════════════════════════════════════════════
+    # BIDS LIST TAB
+    # ═════════════════════════════════════════════════════════════════════════
+    with sub_bids:
+        st.subheader("Bids")
+
+        bids_df = get_bids(engine)
+
+        # Status filter
+        status_filter = st.multiselect(
+            "Filter by status", STATUS_OPTIONS,
+            default=["Draft", "Sent"],
+            key="bids_status_filter",
+        )
+        if status_filter and not bids_df.empty:
+            bids_df = bids_df[bids_df["status"].isin(status_filter)]
+
+        if bids_df.empty:
+            st.info("No bids yet — create one in the Bid Builder tab.")
+        else:
+            display_cols = ["id", "bid_name", "customer", "billing_type",
+                            "status", "bid_days", "total_bbls", "job_code"]
+            show_df = bids_df[[c for c in display_cols if c in bids_df.columns]].copy()
+            show_df.columns = [c.replace("_", " ").title() for c in show_df.columns]
+            st.dataframe(show_df, hide_index=True, use_container_width=True)
+
+        # Quick status update
+        if not bids_df.empty:
+            st.divider()
+            st.markdown("##### Update Bid Status")
+            bc1, bc2, bc3 = st.columns(3)
+            bid_id_options = bids_df["id"].tolist()
+            sel_bid_id = bc1.selectbox(
+                "Bid", bid_id_options,
+                format_func=lambda x: f"#{x} — {bids_df.loc[bids_df['id']==x,'bid_name'].values[0]}",
+                key="bids_status_sel",
+            )
+            new_status = bc2.selectbox("New Status", STATUS_OPTIONS,
+                                       key="bids_new_status")
+            if bc3.button("Update Status", key="bids_update_status"):
+                from services.db import execute as db_execute
+                db_execute(engine,
+                    "UPDATE bids SET status=:s, updated_at=CURRENT_TIMESTAMP WHERE id=:id",
+                    {"s": new_status, "id": sel_bid_id})
+                st.success(f"Bid #{sel_bid_id} → {new_status}")
+                st.rerun()
+
+    # ═════════════════════════════════════════════════════════════════════════
+    # BID BUILDER TAB
+    # ═════════════════════════════════════════════════════════════════════════
+    with sub_builder:
+        st.subheader("Bid Builder")
+
+        customers = get_customers_with_rate_cards(engine)
+        all_bids  = get_bids(engine)
+
+        # ── Select existing bid or create new ─────────────────────────────
+        col_mode, col_sel = st.columns([1, 2])
+        mode = col_mode.radio("", ["New Bid", "Edit Existing"],
+                              key="bb_mode", horizontal=True)
+
+        if mode == "Edit Existing" and not all_bids.empty:
+            sel_bid_id = col_sel.selectbox(
+                "Select bid",
+                all_bids["id"].tolist(),
+                format_func=lambda x: (
+                    f"#{x} — "
+                    f"{all_bids.loc[all_bids['id']==x,'bid_name'].values[0]} "
+                    f"({all_bids.loc[all_bids['id']==x,'customer'].values[0]}) "
+                    f"[{all_bids.loc[all_bids['id']==x,'status'].values[0]}]"
+                ),
+                key="bb_existing_bid",
+            )
+            existing = get_bid(engine, sel_bid_id)
+        else:
+            sel_bid_id = None
+            existing = None
+
+        st.divider()
+
+        # ── Bid header form ───────────────────────────────────────────────
+        st.markdown("##### Bid Details")
+        hf1, hf2, hf3 = st.columns(3)
+        bid_name = hf1.text_input(
+            "Bid Name / Job Description",
+            value=str(existing["bid_name"] if existing is not None else ""),
+            key="bb_bid_name",
+        )
+        cust_options = customers if customers else ["Standard"]
+        cust_default = str(existing["customer"]) if existing is not None else "Standard"
+        cust_idx = cust_options.index(cust_default) if cust_default in cust_options else 0
+        bid_customer = hf2.selectbox("Customer", cust_options,
+                                     index=cust_idx, key="bb_customer")
+        bid_status = hf3.selectbox(
+            "Status", STATUS_OPTIONS,
+            index=STATUS_OPTIONS.index(str(existing["status"]))
+                  if existing is not None else 0,
+            key="bb_status",
+        )
+
+        hf4, hf5, hf6 = st.columns(3)
+        billing_type = hf4.selectbox(
+            "Billing Type",
+            list(BILLING_LABELS.keys()),
+            format_func=lambda x: BILLING_LABELS[x],
+            index=list(BILLING_LABELS.keys()).index(
+                str(existing["billing_type"])
+                if existing is not None else "line_item"
+            ),
+            key="bb_billing_type",
+        )
+        bid_days = hf5.number_input(
+            "Bid Days", min_value=0, step=1,
+            value=int(existing["bid_days"] or 0) if existing is not None else 0,
+            key="bb_bid_days",
+        )
+        total_bbls = hf6.number_input(
+            "Total BBLs (for Per BBL billing)", min_value=0.0, step=1000.0,
+            value=float(existing["total_bbls"] or 0) if existing is not None else 0.0,
+            key="bb_total_bbls",
+        )
+
+        # ── Crew / shift parameters ───────────────────────────────────────
+        st.markdown("##### Crew & Shift Parameters")
+        cf1, cf2, cf3, cf4, cf5 = st.columns(5)
+        hrs_per_shift = cf1.number_input(
+            "Hrs / Shift", min_value=1.0, max_value=24.0, step=0.5,
+            value=float(existing["hrs_per_shift"] or 14) if existing is not None else 14.0,
+            key="bb_hrs_shift",
+        )
+        labor_general = cf2.number_input(
+            "General Labor", min_value=0, step=1,
+            value=int(existing["labor_general"] or 0) if existing is not None else 0,
+            key="bb_labor_gen",
+        )
+        labor_lead = cf3.number_input(
+            "Lead Labor", min_value=0, step=1,
+            value=int(existing["labor_lead"] or 0) if existing is not None else 0,
+            key="bb_labor_lead",
+        )
+        labor_supervisor = cf4.number_input(
+            "Supervisors", min_value=0, step=1,
+            value=int(existing["labor_supervisor"] or 0) if existing is not None else 0,
+            key="bb_labor_sup",
+        )
+        trucks = cf5.number_input(
+            "Trucks", min_value=0, step=1,
+            value=int(existing["trucks"] or 0) if existing is not None else 0,
+            key="bb_trucks",
+        )
+
+        # ── Save bid header ───────────────────────────────────────────────
+        if st.button("💾 Save Bid Header", key="bb_save_header"):
+            bid_data = {
+                "id":               sel_bid_id,
+                "bid_name":         bid_name,
+                "customer":         bid_customer,
+                "region_code":      None,
+                "billing_type":     billing_type,
+                "status":           bid_status,
+                "bid_days":         int(bid_days),
+                "total_bbls":       float(total_bbls) if total_bbls else None,
+                "hrs_per_shift":    float(hrs_per_shift),
+                "labor_general":    int(labor_general),
+                "labor_lead":       int(labor_lead),
+                "labor_supervisor": int(labor_supervisor),
+                "trucks":           int(trucks),
+                "day_rate_override":None,
+                "notes":            None,
+            }
+            new_id = save_bid(engine, bid_data)
+            st.success(f"Bid saved — ID #{new_id}")
+            st.session_state["bb_active_bid_id"] = new_id
+            st.rerun()
+
+        # ── Equipment quantities ──────────────────────────────────────────
+        active_bid_id = st.session_state.get("bb_active_bid_id") or sel_bid_id
+        if not active_bid_id:
+            st.info("Save the bid header above to start entering equipment.")
+            return
+
+        st.divider()
+        st.markdown("##### Equipment & Quantities")
+        st.caption("Enter quantities for items used on this job. "
+                   "Rates pull from the customer rate card — override here if needed for this bid only.")
+
+        catalog   = get_catalog(engine)
+        bid_items = get_bid_items(engine, active_bid_id)
+        bid_obj   = get_bid(engine, active_bid_id)
+
+        # Merge catalog with existing bid items
+        item_qty_map = {}
+        item_override_map = {}
+        if not bid_items.empty:
+            for _, bi in bid_items.iterrows():
+                item_qty_map[int(bi["item_id"])] = float(bi["quantity"])
+                item_override_map[int(bi["item_id"])] = {
+                    "s": bi.get("setup_rate_override"),
+                    "d": bi.get("day_rate_override"),
+                    "m": bi.get("demob_rate_override"),
+                }
+
+        categories = catalog["category"].unique().tolist()
+        updated_items = {}   # item_id -> {qty, overrides}
+
+        for cat in categories:
+            cat_items = catalog[catalog["category"] == cat].reset_index(drop=True)
+            with st.expander(f"**{cat}**", expanded=(cat in ["Layflat", "Pump"])):
+                # Header row
+                h1, h2, h3, h4, h5, h6 = st.columns([3, 1.5, 1.5, 1.5, 1.5, 1])
+                h1.markdown("**Item**")
+                h2.markdown("**Qty**")
+                h3.markdown("**Setup Override**")
+                h4.markdown("**Day Rate Override**")
+                h5.markdown("**Demob Override**")
+
+                for _, item in cat_items.iterrows():
+                    iid  = int(item["id"])
+                    ikey = f"bb_item_{active_bid_id}_{iid}"
+                    unit_label = "miles" if item["qty_source"] == "hose_ft" else item["unit"]
+                    ovr  = item_override_map.get(iid, {})
+
+                    r1, r2, r3, r4, r5, r6 = st.columns([3, 1.5, 1.5, 1.5, 1.5, 1])
+                    r1.write(f"{item['name']}  *({unit_label})*")
+
+                    qty = r2.number_input(
+                        "", min_value=0.0, step=0.1 if item["qty_source"]=="hose_ft" else 1.0,
+                        value=item_qty_map.get(iid, 0.0),
+                        key=f"{ikey}_qty", label_visibility="collapsed",
+                        format="%.2f" if item["qty_source"]=="hose_ft" else "%.0f",
+                    )
+                    s_ov = r3.number_input(
+                        "", min_value=0.0, step=0.01,
+                        value=float(ovr.get("s") or 0),
+                        key=f"{ikey}_sov", label_visibility="collapsed",
+                        disabled=not item["has_setup"], format="%.4f",
+                    )
+                    d_ov = r4.number_input(
+                        "", min_value=0.0, step=0.01,
+                        value=float(ovr.get("d") or 0),
+                        key=f"{ikey}_dov", label_visibility="collapsed",
+                        disabled=not item["has_day_rate"], format="%.4f",
+                    )
+                    m_ov = r5.number_input(
+                        "", min_value=0.0, step=0.01,
+                        value=float(ovr.get("m") or 0),
+                        key=f"{ikey}_mov", label_visibility="collapsed",
+                        disabled=not item["has_demob"], format="%.4f",
+                    )
+                    updated_items[iid] = {
+                        "qty": qty,
+                        "s_ov": s_ov if s_ov > 0 else None,
+                        "d_ov": d_ov if d_ov > 0 else None,
+                        "m_ov": m_ov if m_ov > 0 else None,
+                    }
+
+        if st.button("💾 Save Equipment", key="bb_save_equipment"):
+            for iid, vals in updated_items.items():
+                if vals["qty"] > 0 or iid in item_qty_map:
+                    save_bid_item(engine, active_bid_id, iid, vals["qty"],
+                                  vals["s_ov"], vals["d_ov"], vals["m_ov"])
+            st.success("Equipment saved.")
+            st.rerun()
+
+        # ═════════════════════════════════════════════════════════════════
+        # BID SUMMARY + LINE ITEMS TOGGLE
+        # ═════════════════════════════════════════════════════════════════
+        st.divider()
+        st.markdown("##### Bid Summary")
+
+        bid_items_calc = get_bid_items(engine, active_bid_id)
+        if bid_items_calc.empty:
+            st.info("No equipment entered yet.")
+        else:
+            calc = calc_bid(bid_obj, bid_items_calc)
+
+            # Day rate override for day_rate billing type
+            dr_override = None
+            if billing_type == "day_rate":
+                st.markdown("**Day Rate Billing — set your day rate:**")
+                dr_default = float(bid_obj.get("day_rate_override") or calc["day_total"])
+                dr_col1, dr_col2 = st.columns([2, 3])
+                dr_override = dr_col1.number_input(
+                    "Day Rate ($/day)", min_value=0.0, step=50.0,
+                    value=dr_default, format="%.2f", key="bb_day_rate_override",
+                )
+                dr_col2.caption(
+                    f"Calculated from bid: {MONEY.format(calc['day_total'])}/day  "
+                    f"| Adjustment: {MONEY.format(dr_override - calc['day_total'])}/day"
+                )
+                if st.button("Save Day Rate Override", key="bb_save_dr"):
+                    from services.db import execute as db_execute
+                    db_execute(engine,
+                        "UPDATE bids SET day_rate_override=:dr WHERE id=:id",
+                        {"dr": dr_override, "id": active_bid_id})
+                    st.success("Day rate saved.")
+
+            # Summary metrics
+            eff_day_rate = dr_override if dr_override else calc["day_total"]
+            eff_job_cost = (calc["setup_total"]
+                            + eff_day_rate * calc["bid_days"]
+                            + calc["demob_total"])
+            eff_per_bbl  = (eff_job_cost / calc["total_bbls"]
+                            if calc["total_bbls"] > 0 else None)
+
+            m1, m2, m3, m4, m5 = st.columns(5)
+            m1.metric("Setup",         MONEY.format(calc["setup_total"]))
+            m2.metric("Day Rate/Day",  MONEY.format(eff_day_rate))
+            m3.metric("Demob",         MONEY.format(calc["demob_total"]))
+            m4.metric(f"Total Job Cost ({calc['bid_days']} days)",
+                      MONEY.format(eff_job_cost))
+            if eff_per_bbl:
+                m5.metric("Cost / BBL", f"${eff_per_bbl:.5f}")
+
+            # ── Line Item Toggle ──────────────────────────────────────────
+            show_lines = st.toggle("🔍 Show Line Item Detail", key="bb_show_lines")
+            if show_lines:
+                def _lines_df(lines, label):
+                    if not lines:
+                        return
+                    st.markdown(f"**{label}**")
+                    rows = [{"Item": l["name"],
+                             "Qty": f"{l['qty']:,.2f} {l['unit']}",
+                             "Rate": f"${l['rate']:,.4f}",
+                             "Total": MONEY.format(l["total"])}
+                            for l in lines]
+                    st.dataframe(pd.DataFrame(rows), hide_index=True,
+                                 use_container_width=True)
+
+                _lines_df(calc["setup_lines"],
+                          f"Setup — Total: {MONEY.format(calc['setup_total'])}")
+                _lines_df(calc["day_lines"],
+                          f"Day Rate — {MONEY.format(calc['day_total'])}/day  "
+                          f"× {calc['bid_days']} days = "
+                          f"{MONEY.format(calc['day_total'] * calc['bid_days'])}")
+                _lines_df(calc["demob_lines"],
+                          f"Demob — Total: {MONEY.format(calc['demob_total'])}")
+
+            # ── Convert to Job ────────────────────────────────────────────
+            st.divider()
+            st.markdown("##### Convert to Job")
+
+            if str(bid_obj.get("status")) == "Won":
+                wc1, wc2 = st.columns(2)
+                convert_billing = wc1.selectbox(
+                    "Billing type for ticket/revenue",
+                    list(BILLING_LABELS.keys()),
+                    format_func=lambda x: BILLING_LABELS[x],
+                    index=list(BILLING_LABELS.keys()).index(billing_type),
+                    key="bb_convert_billing",
+                )
+                existing_jobs = query_df(engine,
+                    "SELECT id, job_code, job_name FROM jobs ORDER BY job_code")
+                job_options = existing_jobs["id"].tolist() if not existing_jobs.empty else []
+
+                if wc2.button("🔗 Push Line Items to Job", key="bb_push_lines"):
+                    if not job_options:
+                        st.warning("Create the job first in the Jobs tab.")
+                    else:
+                        target_job_id = st.session_state.get("bb_target_job_id")
+                        if target_job_id:
+                            job_lines = bid_to_job_line_items(
+                                bid_obj, calc, convert_billing)
+                            save_line_items(engine, target_job_id, job_lines)
+                            from services.db import execute as db_execute
+                            db_execute(engine,
+                                "UPDATE bids SET job_id=:jid WHERE id=:bid_id",
+                                {"jid": target_job_id,
+                                 "bid_id": active_bid_id})
+                            st.success(
+                                f"✅ {len(job_lines)} line items pushed to job.")
+                            st.rerun()
+
+                target_job = st.selectbox(
+                    "Target job", job_options,
+                    format_func=lambda x: (
+                        f"{existing_jobs.loc[existing_jobs['id']==x,'job_code'].values[0]} — "
+                        f"{existing_jobs.loc[existing_jobs['id']==x,'job_name'].values[0]}"
+                    ),
+                    key="bb_target_job_id",
+                ) if job_options else None
+                st.session_state["bb_target_job_id"] = target_job
+
+                st.caption(
+                    "This will replace any existing line items on the job. "
+                    "You can switch billing type here without changing the bid."
+                )
+            else:
+                st.info("Set bid status to **Won** to convert to job line items.")
+
+
+with tab_bidding:
+    render_bidding_tab(engine)
