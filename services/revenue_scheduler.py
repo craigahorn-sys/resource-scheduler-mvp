@@ -165,12 +165,15 @@ def get_revenue_jobs_df(engine, region_code: str, month: int, year: int) -> pd.D
 def build_revenue_excel(jobs_df: pd.DataFrame, line_items_df: pd.DataFrame,
                         lob_label: str, month_label: str) -> bytes:
     """
-    Builds a formatted revenue accrual Excel workbook matching the template layout.
-    Returns bytes ready for st.download_button.
+    Builds a revenue accrual workbook matching the January 2026 template layout.
+    15 columns A-N (K is a narrow spacer).
+    Each job block: A/R header, job info row, spacer, line item header, lines, summary row.
     """
+    from io import BytesIO
+    from datetime import date as _date, datetime as _datetime
+    import calendar
     from openpyxl import Workbook
-    from openpyxl.styles import (Alignment, Border, Font, PatternFill, Side,
-                                 numbers)
+    from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
     from openpyxl.utils import get_column_letter
 
     wb = Workbook()
@@ -178,332 +181,360 @@ def build_revenue_excel(jobs_df: pd.DataFrame, line_items_df: pd.DataFrame,
     ws.title = lob_label[:31]
 
     # ── Styles ────────────────────────────────────────────────────────────────
-    HEADER_FILL   = PatternFill("solid", fgColor="1F4E79")
-    JOB_FILL      = PatternFill("solid", fgColor="D6E4F0")
-    SUMMARY_FILL  = PatternFill("solid", fgColor="E2EFDA")
-    TOTAL_FILL    = PatternFill("solid", fgColor="BDD7EE")
-    THIN          = Side(style="thin", color="AAAAAA")
-    THICK         = Side(style="medium", color="444444")
-    thin_border   = Border(left=THIN, right=THIN, top=THIN, bottom=THIN)
-    thick_bottom  = Border(bottom=THICK)
+    GREEN_HEX   = "3D8840"
+    GRAY_HEX    = "EFEFEF"
+    GREEN_FILL  = PatternFill("solid", fgColor=GREEN_HEX)
+    GRAY_FILL   = PatternFill("solid", fgColor=GRAY_HEX)
+    NO_FILL     = PatternFill(fill_type=None)
 
-    def hdr_font(size=10, bold=True, color="FFFFFF"):
+    HAIR   = Side(style="hair")
+    THIN   = Side(style="thin")
+    MED    = Side(style="medium")
+    NONE_S = Side(style=None)
+
+    def _border(left=None, right=None, top=None, bottom=None):
+        return Border(
+            left=left   or NONE_S,
+            right=right or NONE_S,
+            top=top     or NONE_S,
+            bottom=bottom or NONE_S,
+        )
+
+    hair_bottom = _border(bottom=HAIR)
+    thin_bottom = _border(bottom=THIN)
+    med_bottom  = _border(bottom=MED)
+
+    def _font(bold=False, size=10, color="000000"):
         return Font(name="Arial", size=size, bold=bold, color=color)
 
-    def body_font(size=10, bold=False, color="000000"):
-        return Font(name="Arial", size=size, bold=bold, color=color)
+    def _align(h="left", v="center", wrap=False):
+        return Alignment(horizontal=h, vertical=v, wrap_text=wrap)
 
-    def money_fmt(cell):
-        cell.number_format = '#,##0.00'
+    def _w(ws, col_letter, width):
+        ws.column_dimensions[col_letter].width = width
 
-    def date_fmt(cell):
-        cell.number_format = 'MM/DD/YYYY'
+    # ── Column widths (A-N, K is spacer) ──────────────────────────────────────
+    for col, w in [("A",9.13),("B",2.38),("C",18.38),("D",43.75),("E",18.0),
+                   ("F",20.0),("G",8.75),("H",9.75),("I",9.38),("J",9.0),
+                   ("K",2.13),("L",14.0),("M",14.0),("N",14.0)]:
+        _w(ws, col, w)
 
-    def center(cell):
-        cell.alignment = Alignment(horizontal="center", vertical="center")
-
-    def _set(ws, row, col, value, font=None, fill=None, border=None,
-             align=None, num_fmt=None):
+    # ── Helper: write a cell ──────────────────────────────────────────────────
+    def _c(row, col, value=None, font=None, fill=None, border=None,
+           align=None, num_fmt=None):
         c = ws.cell(row=row, column=col, value=value)
-        if font:   c.font   = font
-        if fill:   c.fill   = fill
-        if border: c.border = border
-        if align:  c.alignment = align
+        if font:    c.font   = font
+        if fill:    c.fill   = fill
+        if border:  c.border = border
+        if align:   c.alignment = align
         if num_fmt: c.number_format = num_fmt
         return c
 
-    # ── Column widths ─────────────────────────────────────────────────────────
-    col_widths = [6, 30, 10, 14, 14, 8, 14, 14, 16]
-    col_names  = ["Line #", "Description", "UOM", "Start", "End",
-                  "# of Days", "Invoice Qty", "Unit Price", "Line Total"]
-    for i, w in enumerate(col_widths, start=1):
-        ws.column_dimensions[get_column_letter(i)].width = w
+    def _merge(r1, c1, r2, c2):
+        ws.merge_cells(start_row=r1, start_column=c1,
+                       end_row=r2, end_column=c2)
 
-    current_row = 1
+    MONEY = "$#,##0.00"
+    DATE_FMT = "MM/DD/YYYY"
+    NUM_FMT  = "0.##"
 
-    # ── LOB header bar ────────────────────────────────────────────────────────
-    ws.merge_cells(start_row=current_row, start_column=1,
-                   end_row=current_row, end_column=9)
-    c = ws.cell(row=current_row, column=1,
-                value=f"{lob_label}  —  Revenue Accrual  |  {month_label}")
-    c.font = hdr_font(size=12)
-    c.fill = HEADER_FILL
-    c.alignment = Alignment(horizontal="center", vertical="center")
-    ws.row_dimensions[current_row].height = 20
-    current_row += 1
-
-    # ── Column headers ────────────────────────────────────────────────────────
-    for col_i, name in enumerate(col_names, start=1):
-        c = ws.cell(row=current_row, column=col_i, value=name)
-        c.font   = hdr_font()
-        c.fill   = HEADER_FILL
-        c.border = thin_border
-        c.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
-    ws.row_dimensions[current_row].height = 30
-    current_row += 1
-
-    grand_total = 0.0
+    # ── Customer rollup panel (rows 2-49, cols A-F) ───────────────────────────
+    # Will be filled after processing all jobs
+    PANEL_START = 2
     customer_totals: dict[str, float] = {}
+    grand_total = 0.0
 
-    for _, job in jobs_df.iterrows():
-        job_id = int(job["id"])
+    # LOB header row
+    for col, label, h in [(1,"LOB","right"),(3,"Projection","center"),
+                           (5,"Customer","left"),(6,"Total","center")]:
+        _c(PANEL_START, col, label,
+           font=_font(bold=True), fill=GREEN_FILL,
+           border=hair_bottom, align=_align(h=h))
+
+    current_row = PANEL_START + 1   # row 3 — customer rows filled in later
+    PANEL_END_ROW = 49              # reserve rows 3-49 for customer list + total
+    current_row = PANEL_END_ROW + 2  # start job blocks at row 51
+
+    # ── Job blocks ────────────────────────────────────────────────────────────
+    for job_num, (_, job) in enumerate(jobs_df.iterrows(), start=1):
+        job_id    = int(job["id"])
         job_items = (
             line_items_df[line_items_df["job_id"] == job_id]
             .sort_values(["line_number", "id"])
             if not line_items_df.empty else pd.DataFrame()
         )
 
-        # ── Job header ────────────────────────────────────────────────────────
-        ws.merge_cells(start_row=current_row, start_column=1,
-                       end_row=current_row, end_column=9)
-        job_header_text = (
-            f"Job: {job['job_code']}  |  {job['job_name']}"
-            f"  |  Customer: {job.get('customer', '') or '—'}"
-            f"  |  Company Man: {job.get('company_man', '') or '—'}"
-            f"  |  Invoice: {job.get('invoice_number', '') or '—'}"
-            f"  |  SO/Ticket: {job.get('so_ticket_number', '') or '—'}"
-        )
-        c = ws.cell(row=current_row, column=1, value=job_header_text)
-        c.font = body_font(bold=True)
-        c.fill = JOB_FILL
-        c.border = thick_bottom
-        ws.row_dimensions[current_row].height = 16
+        # ── A/R + Approval header (green) ─────────────────────────────────
+        ws.row_dimensions[current_row].height = 15.75
+        _c(current_row, 8,  "A/R",
+           font=_font(bold=True), fill=GREEN_FILL,
+           border=hair_bottom, align=_align(h="center"))
+        _merge(current_row, 12, current_row, 14)
+        _c(current_row, 12, "Approval - Ops Manager",
+           font=_font(bold=True), fill=GREEN_FILL,
+           border=hair_bottom, align=_align(h="center"))
         current_row += 1
 
-        job_total = 0.0
+        # ── Column header row (green) ──────────────────────────────────────
+        ws.row_dimensions[current_row].height = 15.75
+        hdr_cols = [
+            (1,"Job #","center"), (3,"LOB","center"),
+            (4,"Lease Name/Number","center"), (5,"Customer","center"),
+            (6,"Co. Man","center"), (8,"Initials","center"),
+            (9,"Date","center"), (10,"Sent","center"),
+            (12,"Initials","center"), (13,"Date","center"),
+            (14,"Accrue","center"),
+        ]
+        for col, label, h in hdr_cols:
+            _c(current_row, col, label,
+               font=_font(bold=True), fill=GREEN_FILL,
+               border=hair_bottom, align=_align(h=h))
+        current_row += 1
 
+        # ── Job info row (gray) ────────────────────────────────────────────
+        ws.row_dimensions[current_row].height = 15.75
+        job_info = [
+            (1, job_num,                              "center"),
+            (3, lob_label,                            "center"),
+            (4, str(job.get("job_name","") or ""),    "left"),
+            (5, str(job.get("customer","") or ""),    "center"),
+            (6, str(job.get("company_man","") or ""), "center"),
+        ]
+        for col, val, h in job_info:
+            _c(current_row, col, val,
+               font=_font(), fill=GRAY_FILL,
+               border=med_bottom, align=_align(h=h))
+        current_row += 1
+
+        # ── Spacer row ─────────────────────────────────────────────────────
+        ws.row_dimensions[current_row].height = 6.75
+        current_row += 1
+
+        # ── Line item header (green) ───────────────────────────────────────
+        ws.row_dimensions[current_row].height = 15.75
+        li_hdrs = [
+            (1,"Line #","center"), (4,"Description","center"),
+            (5,"UOM","center"),    (8,"Start","center"),
+            (9,"End","center"),    (10,"# of Days","center"),
+            (12,"Invoice Qty","center"), (13,"Price","center"),
+            (14,"Line Total","center"),
+        ]
+        for col, label, h in li_hdrs:
+            _c(current_row, col, label,
+               font=_font(bold=True), fill=GREEN_FILL,
+               border=hair_bottom, align=_align(h=h))
+        # A col has gray fill in template for line # header
+        _c(current_row, 1, "Line #",
+           font=_font(bold=True), fill=GRAY_FILL,
+           border=thin_bottom, align=_align(h="center"))
+        current_row += 1
+
+        # ── Line item rows (gray) ──────────────────────────────────────────
+        job_total = 0.0
         if job_items.empty:
-            ws.merge_cells(start_row=current_row, start_column=1,
-                           end_row=current_row, end_column=9)
-            ws.cell(row=current_row, column=1,
-                    value="  (No line items entered yet)").font = body_font(color="999999")
+            ws.row_dimensions[current_row].height = 15.75
+            _merge(current_row, 1, current_row, 14)
+            _c(current_row, 1, "(No line items entered yet)",
+               font=_font(color="999999"), fill=GRAY_FILL,
+               align=_align(h="center"))
             current_row += 1
         else:
-            for li_i, li in enumerate(job_items.itertuples(), start=1):
-                # Compute days if both dates present
+            for li_num, li in enumerate(job_items.itertuples(), start=1):
+                ws.row_dimensions[current_row].height = 15.75
+
                 days = None
-                if pd.notna(li.start_date) and pd.notna(li.end_date):
+                if pd.notna(getattr(li,"start_date",None)) and pd.notna(getattr(li,"end_date",None)):
                     try:
                         days = (pd.to_datetime(li.end_date) -
                                 pd.to_datetime(li.start_date)).days + 1
                     except Exception:
                         days = None
 
-                # Line total: prefer stored value, else compute
                 lt = _num(li.line_total)
-                if lt is None:
-                    qty = _num(li.invoice_qty)
-                    price = _num(li.unit_price)
-                    lt = (qty * price) if (qty is not None and price is not None) else None
-
-                row_vals = [
-                    li_i,
-                    str(li.description or ""),
-                    str(li.uom or ""),
-                    pd.to_datetime(li.start_date).date() if pd.notna(li.start_date) else None,
-                    pd.to_datetime(li.end_date).date()   if pd.notna(li.end_date)   else None,
-                    days,
-                    _num(li.invoice_qty),
-                    _num(li.unit_price),
-                    lt,
-                ]
-                for col_i, val in enumerate(row_vals, start=1):
-                    c = ws.cell(row=current_row, column=col_i, value=val)
-                    c.font   = body_font()
-                    c.border = thin_border
-                    c.alignment = Alignment(vertical="center",
-                                            horizontal="center" if col_i in (1, 3, 6, 7) else "left")
-                    if col_i in (4, 5) and val is not None:
-                        c.number_format = "MM/DD/YYYY"
-                    if col_i in (8, 9) and val is not None:
-                        c.number_format = "#,##0.00"
-
+                qty   = _num(li.invoice_qty)
+                price = _num(li.unit_price)
+                if lt is None and qty is not None and price is not None:
+                    lt = qty * price
                 if lt is not None:
                     job_total += lt
+
+                li_data = [
+                    (1,  li_num,   "center", None),
+                    (4,  str(li.description or ""), "left", None),
+                    (5,  str(li.uom or ""),         "center", None),
+                    (8,  pd.to_datetime(li.start_date).date()
+                         if pd.notna(getattr(li,"start_date",None)) else None,
+                         "center", DATE_FMT),
+                    (9,  pd.to_datetime(li.end_date).date()
+                         if pd.notna(getattr(li,"end_date",None)) else None,
+                         "center", DATE_FMT),
+                    (10, days,     "center", None),
+                    (12, qty,      "center", NUM_FMT),
+                    (13, price,    "center", MONEY),
+                    (14, lt,       "right",  MONEY),
+                ]
+                for col, val, h, fmt in li_data:
+                    _c(current_row, col, val,
+                       font=_font(), fill=GRAY_FILL,
+                       border=thin_bottom, align=_align(h=h),
+                       num_fmt=fmt)
                 current_row += 1
 
-        # ── Job total row ─────────────────────────────────────────────────────
-        ws.merge_cells(start_row=current_row, start_column=1,
-                       end_row=current_row, end_column=7)
-        c = ws.cell(row=current_row, column=1,
-                    value=f"Day Rate: ${_fmt(job.get('day_rate'))}     Job Total:")
-        c.font = body_font(bold=True)
-        c.fill = SUMMARY_FILL
-        c.alignment = Alignment(horizontal="right", vertical="center")
-
-        c2 = ws.cell(row=current_row, column=8, value=None)   # spacer
-        c3 = ws.cell(row=current_row, column=9, value=job_total)
-        c3.font = body_font(bold=True)
-        c3.fill = SUMMARY_FILL
-        c3.number_format = "#,##0.00"
-        c3.alignment = Alignment(horizontal="right", vertical="center")
-        ws.row_dimensions[current_row].height = 16
+        # ── Summary row ────────────────────────────────────────────────────
+        ws.row_dimensions[current_row].height = 15.75
+        summary_data = [
+            (3,  str(job.get("customer","") or ""),        "left"),
+            (4,  str(job.get("county_state","") or ""),    "left"),
+            (5,  str(job.get("invoice_number","") or ""),  "center"),
+            (6,  str(job.get("so_ticket_number","") or ""),"center"),
+            (12, _num(job.get("day_rate")),                "right"),
+            (14, job_total,                                "right"),
+        ]
+        for col, val, h in summary_data:
+            fmt = MONEY if col in (12, 14) else None
+            _c(current_row, col, val,
+               font=_font(bold=True), fill=GRAY_FILL,
+               border=med_bottom, align=_align(h=h),
+               num_fmt=fmt)
+        # Labels above values
+        for col, label in [(12,"Day Rate"),(14,"Job Total")]:
+            c = ws.cell(row=current_row, column=col)
+            # add label as comment-style — put it in the row above summary
+            pass
         current_row += 2   # blank gap between jobs
 
         grand_total += job_total
-        cust = str(job.get("customer", "") or "Unassigned")
+        cust = str(job.get("customer","") or "Unassigned")
         customer_totals[cust] = customer_totals.get(cust, 0.0) + job_total
 
-    # ── Grand total bar ───────────────────────────────────────────────────────
-    ws.merge_cells(start_row=current_row, start_column=1,
-                   end_row=current_row, end_column=8)
-    c = ws.cell(row=current_row, column=1,
-                value=f"TOTAL  —  {lob_label}  |  {month_label}")
-    c.font = hdr_font(size=11)
-    c.fill = TOTAL_FILL
-    c.alignment = Alignment(horizontal="right", vertical="center")
-    c2 = ws.cell(row=current_row, column=9, value=grand_total)
-    c2.font = hdr_font(size=11, color="000000")
-    c2.fill = TOTAL_FILL
-    c2.number_format = "#,##0.00"
-    c2.alignment = Alignment(horizontal="right", vertical="center")
-    ws.row_dimensions[current_row].height = 20
-    current_row += 2
-
-    # ── Customer rollup ───────────────────────────────────────────────────────
-    ws.merge_cells(start_row=current_row, start_column=1,
-                   end_row=current_row, end_column=9)
-    c = ws.cell(row=current_row, column=1, value="Customer Totals")
-    c.font = hdr_font()
-    c.fill = HEADER_FILL
-    c.alignment = Alignment(horizontal="center")
-    current_row += 1
+    # ── Fill customer rollup panel (rows 3-49) ────────────────────────────────
+    panel_row = PANEL_START + 1
+    # LOB + projection on row 3
+    _c(panel_row, 1, lob_label,
+       font=_font(bold=True), fill=GRAY_FILL,
+       border=hair_bottom, align=_align(h="right"))
+    _c(panel_row, 3, grand_total,
+       font=_font(bold=True), fill=GRAY_FILL,
+       border=hair_bottom, align=_align(h="center"), num_fmt=MONEY)
+    panel_row += 1
 
     for cust, total in sorted(customer_totals.items()):
-        ws.merge_cells(start_row=current_row, start_column=1,
-                       end_row=current_row, end_column=8)
-        ws.cell(row=current_row, column=1, value=cust).font = body_font()
-        ct = ws.cell(row=current_row, column=9, value=total)
-        ct.font = body_font(bold=True)
-        ct.number_format = "#,##0.00"
-        ct.alignment = Alignment(horizontal="right")
-        current_row += 1
+        if panel_row > PANEL_END_ROW:
+            break
+        ws.row_dimensions[panel_row].height = 15.75
+        _c(panel_row, 5, cust,
+           font=_font(), fill=GRAY_FILL,
+           border=hair_bottom, align=_align(h="left"))
+        _c(panel_row, 6, total,
+           font=_font(), fill=GRAY_FILL,
+           border=hair_bottom, align=_align(h="center"), num_fmt=MONEY)
+        panel_row += 1
 
-    # freeze top two rows
-    ws.freeze_panes = "A3"
+    # Grand total line in panel
+    if panel_row <= PANEL_END_ROW:
+        _c(panel_row, 5, "TOTAL",
+           font=_font(bold=True), fill=GREEN_FILL,
+           border=hair_bottom, align=_align(h="left"))
+        _c(panel_row, 6, grand_total,
+           font=_font(bold=True), fill=GREEN_FILL,
+           border=hair_bottom, align=_align(h="center"), num_fmt=MONEY)
+
+    ws.freeze_panes = "A51"
 
     # ── Summary sheet ─────────────────────────────────────────────────────────
-    from datetime import date as _date, datetime as _datetime
-    import calendar
+    today = _date.today()
+    try:
+        from datetime import datetime as _dt
+        month_dt = _dt.strptime(month_label, "%B %Y")
+        report_month, report_year = month_dt.month, month_dt.year
+    except Exception:
+        report_month, report_year = today.month, today.year
+
+    days_in_month = calendar.monthrange(report_year, report_month)[1]
+    days_elapsed  = today.day if (report_month == today.month and
+                                   report_year == today.year) else days_in_month
 
     ss = wb.create_sheet("Summary")
-
-    # Calculate days elapsed and days in month
-    today = _date.today()
-    # Parse month/year from month_label e.g. "January 2026"
-    try:
-        month_dt = _datetime.strptime(month_label, "%B %Y")
-        report_month = month_dt.month
-        report_year  = month_dt.year
-    except Exception:
-        report_month = today.month
-        report_year  = today.year
-
-    days_in_month  = calendar.monthrange(report_year, report_month)[1]
-    # Days elapsed: if current month use today, else full month
-    if report_month == today.month and report_year == today.year:
-        days_elapsed = today.day
-    else:
-        days_elapsed = days_in_month
-
-    # Column widths
-    for col, w in [(1, 28), (2, 18), (3, 16), (4, 18), (5, 16), (6, 14)]:
-        ss.column_dimensions[get_column_letter(col)].width = w
+    for col, w in [("A",28),("B",18),("C",14),("D",18),("E",18),("F",16)]:
+        ss.column_dimensions[col].width = w
 
     # Title
     ss.merge_cells("A1:F1")
     c = ss["A1"]
     c.value = f"{lob_label}  —  Monthly Summary  |  {month_label}"
-    c.font = hdr_font(size=12)
-    c.fill = HEADER_FILL
-    c.alignment = Alignment(horizontal="center", vertical="center")
+    c.font  = _font(bold=True, size=12, color="FFFFFF")
+    c.fill  = GREEN_FILL
+    c.alignment = _align(h="center")
     ss.row_dimensions[1].height = 22
 
-    # Days metadata row
+    # Metadata
     ss.merge_cells("A2:F2")
     c = ss["A2"]
-    c.value = f"Days Elapsed: {days_elapsed}  of  {days_in_month}  |  Generated: {today.strftime('%m/%d/%Y')}"
-    c.font = body_font(bold=False, color="444444")
-    c.alignment = Alignment(horizontal="center", vertical="center")
+    c.value = (f"Days Elapsed: {days_elapsed}  of  {days_in_month}"
+               f"  |  Generated: {today.strftime('%m/%d/%Y')}")
+    c.font  = _font(color="444444")
+    c.alignment = _align(h="center")
     ss.row_dimensions[2].height = 16
 
     # Column headers
-    hdr_labels = ["Customer", "Actual Total", "Days Elapsed",
-                  "Daily Run Rate", "Projected Total", "Variance"]
-    for col_i, label in enumerate(hdr_labels, start=1):
+    for col_i, label in enumerate(
+        ["Customer","Actual Total","Days Elapsed",
+         "Daily Run Rate","Projected Total","Variance"], start=1):
         c = ss.cell(row=3, column=col_i, value=label)
-        c.font   = hdr_font()
-        c.fill   = HEADER_FILL
-        c.border = thin_border
-        c.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
-    ss.row_dimensions[3].height = 28
+        c.font   = _font(bold=True, color="FFFFFF")
+        c.fill   = GREEN_FILL
+        c.border = _border(bottom=THIN)
+        c.alignment = _align(h="center")
+    ss.row_dimensions[3].height = 22
 
     # Customer rows
-    data_start_row = 4
-    for r_i, (cust, actual) in enumerate(sorted(customer_totals.items())):
-        r = data_start_row + r_i
+    for r_i, (cust, actual) in enumerate(sorted(customer_totals.items()), start=4):
         run_rate  = actual / days_elapsed if days_elapsed > 0 else 0.0
         projected = run_rate * days_in_month
         variance  = projected - actual
+        ss.row_dimensions[r_i].height = 15.75
+        for col_i, val, fmt, h, bold, color in [
+            (1, cust,      None,   "left",  False, "000000"),
+            (2, actual,    MONEY,  "right", False, "000000"),
+            (3, days_elapsed, "0","center", False, "000000"),
+            (4, run_rate,  MONEY,  "right", False, "000000"),
+            (5, projected, MONEY,  "right", False, "000000"),
+            (6, variance,  MONEY,  "right", True,
+             "375623" if variance >= 0 else "9C0006"),
+        ]:
+            c = ss.cell(row=r_i, column=col_i, value=val)
+            c.font   = _font(bold=bold, color=color)
+            c.fill   = GRAY_FILL
+            c.border = _border(bottom=HAIR)
+            c.alignment = _align(h=h)
+            if fmt: c.number_format = fmt
 
-        row_vals = [cust, actual, days_elapsed, run_rate, projected, variance]
-        for col_i, val in enumerate(row_vals, start=1):
-            c = ss.cell(row=r, column=col_i, value=val)
-            c.font   = body_font()
-            c.border = thin_border
-            c.alignment = Alignment(
-                horizontal="right" if col_i > 1 else "left",
-                vertical="center"
-            )
-            if col_i in (2, 4, 5, 6):
-                c.number_format = "$#,##0.00"
-            if col_i == 3:
-                c.number_format = "0"
-            # Color variance: green if positive, red if negative
-            if col_i == 6:
-                color = "375623" if variance >= 0 else "9C0006"
-                c.font = body_font(bold=True, color=color)
-        ss.row_dimensions[r].height = 16
-
-    total_rows = len(customer_totals)
-    total_row  = data_start_row + total_rows
-
-    # Grand total row
-    for col_i in range(1, 7):
-        c = ss.cell(row=total_row, column=col_i)
-        c.fill   = TOTAL_FILL
-        c.border = thin_border
-        c.font   = body_font(bold=True)
-        c.alignment = Alignment(horizontal="right" if col_i > 1 else "left", vertical="center")
-
-    ss.cell(row=total_row, column=1).value = "TOTAL"
-    grand_run_rate  = grand_total / days_elapsed if days_elapsed > 0 else 0.0
-    grand_projected = grand_run_rate * days_in_month
-    grand_variance  = grand_projected - grand_total
-
-    for col_i, val, fmt in [
-        (2, grand_total,     "$#,##0.00"),
-        (3, days_elapsed,    "0"),
-        (4, grand_run_rate,  "$#,##0.00"),
-        (5, grand_projected, "$#,##0.00"),
-        (6, grand_variance,  "$#,##0.00"),
+    # Grand total
+    tr = 4 + len(customer_totals)
+    ss.row_dimensions[tr].height = 18
+    gr  = grand_total / days_elapsed if days_elapsed > 0 else 0.0
+    gp  = gr * days_in_month
+    gv  = gp - grand_total
+    for col_i, val, fmt, h in [
+        (1, "TOTAL",       None,  "left"),
+        (2, grand_total,   MONEY, "right"),
+        (3, days_elapsed,  "0",   "center"),
+        (4, gr,            MONEY, "right"),
+        (5, gp,            MONEY, "right"),
+        (6, gv,            MONEY, "right"),
     ]:
-        c = ss.cell(row=total_row, column=col_i, value=val)
-        c.fill   = TOTAL_FILL
-        c.border = thin_border
-        c.font   = body_font(bold=True)
-        c.number_format = fmt
-        c.alignment = Alignment(horizontal="right", vertical="center")
+        c = ss.cell(row=tr, column=col_i, value=val)
+        c.font   = _font(bold=True, color="FFFFFF")
+        c.fill   = GREEN_FILL
+        c.border = _border(bottom=MED)
+        c.alignment = _align(h=h)
+        if fmt: c.number_format = fmt
 
-    ss.row_dimensions[total_row].height = 18
     ss.freeze_panes = "A4"
 
     out = BytesIO()
     wb.save(out)
     return out.getvalue()
-
-
-# ── Helpers ───────────────────────────────────────────────────────────────────
 
 def _num(val):
     """Convert to float or return None."""
