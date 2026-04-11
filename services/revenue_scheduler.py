@@ -165,9 +165,11 @@ def get_revenue_jobs_df(engine, region_code: str, month: int, year: int) -> pd.D
 def build_revenue_excel(jobs_df: pd.DataFrame, line_items_df: pd.DataFrame,
                         lob_label: str, month_label: str) -> bytes:
     """
-    Builds a revenue accrual workbook matching the January 2026 template layout.
-    15 columns A-N (K is a narrow spacer).
-    Each job block: A/R header, job info row, spacer, line item header, lines, summary row.
+    Builds a revenue accrual workbook matching the January 2026 CO tab layout exactly.
+    - Rows 1-49:  Customer rollup panel (cols A-F) + Check panel (cols L-M)
+    - Row 50:     Blank
+    - Row 51+:    Job blocks (A/R header, col headers, job info, spacer,
+                  line header, lines, summary label row, summary data row, gap)
     """
     from io import BytesIO
     from datetime import date as _date, datetime as _datetime
@@ -181,81 +183,60 @@ def build_revenue_excel(jobs_df: pd.DataFrame, line_items_df: pd.DataFrame,
     ws.title = lob_label[:31]
 
     # ── Styles ────────────────────────────────────────────────────────────────
-    GREEN_HEX   = "3D8840"
-    GRAY_HEX    = "EFEFEF"
-    GREEN_FILL  = PatternFill("solid", fgColor=GREEN_HEX)
-    GRAY_FILL   = PatternFill("solid", fgColor=GRAY_HEX)
-    NO_FILL     = PatternFill(fill_type=None)
+    GREEN_FILL = PatternFill("solid", fgColor="3D8840")
+    GRAY_FILL  = PatternFill("solid", fgColor="EFEFEF")
 
-    HAIR   = Side(style="hair")
-    THIN   = Side(style="thin")
-    MED    = Side(style="medium")
-    NONE_S = Side(style=None)
+    HAIR = Side(style="hair");  THIN = Side(style="thin")
+    MED  = Side(style="medium"); NS   = Side(style=None)
 
-    def _border(left=None, right=None, top=None, bottom=None):
-        return Border(
-            left=left   or NONE_S,
-            right=right or NONE_S,
-            top=top     or NONE_S,
-            bottom=bottom or NONE_S,
-        )
+    def _bdr(b=None, t=None, l=None, r=None):
+        return Border(bottom=b or NS, top=t or NS,
+                      left=l or NS,  right=r or NS)
 
-    hair_bottom = _border(bottom=HAIR)
-    thin_bottom = _border(bottom=THIN)
-    med_bottom  = _border(bottom=MED)
-
-    def _font(bold=False, size=10, color="000000"):
+    def _f(bold=False, size=10, color="000000"):
         return Font(name="Arial", size=size, bold=bold, color=color)
 
-    def _align(h="left", v="center", wrap=False):
+    def _a(h="left", v="center", wrap=False):
         return Alignment(horizontal=h, vertical=v, wrap_text=wrap)
 
-    def _w(ws, col_letter, width):
-        ws.column_dimensions[col_letter].width = width
-
-    # ── Column widths (A-N, K is spacer) ──────────────────────────────────────
-    for col, w in [("A",9.13),("B",2.38),("C",18.38),("D",43.75),("E",18.0),
-                   ("F",20.0),("G",8.75),("H",9.75),("I",9.38),("J",9.0),
-                   ("K",2.13),("L",14.0),("M",14.0),("N",14.0)]:
-        _w(ws, col, w)
-
-    # ── Helper: write a cell ──────────────────────────────────────────────────
-    def _c(row, col, value=None, font=None, fill=None, border=None,
-           align=None, num_fmt=None):
-        c = ws.cell(row=row, column=col, value=value)
-        if font:    c.font   = font
-        if fill:    c.fill   = fill
-        if border:  c.border = border
-        if align:   c.alignment = align
-        if num_fmt: c.number_format = num_fmt
+    def _c(row, col, val=None, font=None, fill=None,
+           bdr=None, align=None, fmt=None):
+        c = ws.cell(row=row, column=col, value=val)
+        if font:  c.font   = font
+        if fill:  c.fill   = fill
+        if bdr:   c.border = bdr
+        if align: c.alignment = align
+        if fmt:   c.number_format = fmt
         return c
 
-    def _merge(r1, c1, r2, c2):
+    def _mg(r1, c1, r2, c2):
         ws.merge_cells(start_row=r1, start_column=c1,
                        end_row=r2, end_column=c2)
 
-    MONEY = "$#,##0.00"
+    MONEY    = "$#,##0.00"
     DATE_FMT = "MM/DD/YYYY"
     NUM_FMT  = "0.##"
 
-    # ── Customer rollup panel (rows 2-49, cols A-F) ───────────────────────────
-    # Will be filled after processing all jobs
-    PANEL_START = 2
-    customer_totals: dict[str, float] = {}
+    # ── Column widths (A-N, K=spacer) ────────────────────────────────────────
+    for col, w in [("A",9.13),("B",2.38),("C",18.38),("D",43.75),
+                   ("E",18.0),("F",20.0),("G",8.75),("H",9.75),
+                   ("I",9.38),("J",9.0),("K",2.13),
+                   ("L",14.0),("M",14.0),("N",14.0)]:
+        ws.column_dimensions[col].width = w
+
+    # ── Uniform row height helper ─────────────────────────────────────────────
+    def _rh(row, h=15.75):
+        ws.row_dimensions[row].height = h
+
+    # =========================================================================
+    # PASS 1 — process jobs, accumulate totals
+    # =========================================================================
     grand_total = 0.0
+    customer_totals: dict[str, float] = {}
 
-    # LOB header row
-    for col, label, h in [(1,"LOB","right"),(3,"Projection","center"),
-                           (5,"Customer","left"),(6,"Total","center")]:
-        _c(PANEL_START, col, label,
-           font=_font(bold=True), fill=GREEN_FILL,
-           border=hair_bottom, align=_align(h=h))
+    # Job blocks start at row 51
+    current_row = 51
 
-    current_row = PANEL_START + 1   # row 3 — customer rows filled in later
-    PANEL_END_ROW = 49              # reserve rows 3-49 for customer list + total
-    current_row = PANEL_END_ROW + 2  # start job blocks at row 51
-
-    # ── Job blocks ────────────────────────────────────────────────────────────
     for job_num, (_, job) in enumerate(jobs_df.iterrows(), start=1):
         job_id    = int(job["id"])
         job_items = (
@@ -264,207 +245,237 @@ def build_revenue_excel(jobs_df: pd.DataFrame, line_items_df: pd.DataFrame,
             if not line_items_df.empty else pd.DataFrame()
         )
 
-        # ── A/R + Approval header (green) ─────────────────────────────────
-        ws.row_dimensions[current_row].height = 15.75
-        _c(current_row, 8,  "A/R",
-           font=_font(bold=True), fill=GREEN_FILL,
-           border=hair_bottom, align=_align(h="center"))
-        _merge(current_row, 12, current_row, 14)
+        # ── A/R header row ────────────────────────────────────────────────
+        _rh(current_row)
+        _mg(current_row, 8, current_row, 10)
+        _c(current_row, 8, "A/R",
+           font=_f(bold=True), fill=GREEN_FILL,
+           bdr=_bdr(b=HAIR), align=_a(h="center"))
+        _mg(current_row, 12, current_row, 14)
         _c(current_row, 12, "Approval - Ops Manager",
-           font=_font(bold=True), fill=GREEN_FILL,
-           border=hair_bottom, align=_align(h="center"))
+           font=_f(bold=True), fill=GREEN_FILL,
+           bdr=_bdr(b=HAIR), align=_a(h="center"))
         current_row += 1
 
-        # ── Column header row (green) ──────────────────────────────────────
-        ws.row_dimensions[current_row].height = 15.75
-        hdr_cols = [
-            (1,"Job #","center"), (3,"LOB","center"),
-            (4,"Lease Name/Number","center"), (5,"Customer","center"),
-            (6,"Co. Man","center"), (8,"Initials","center"),
-            (9,"Date","center"), (10,"Sent","center"),
-            (12,"Initials","center"), (13,"Date","center"),
-            (14,"Accrue","center"),
-        ]
-        for col, label, h in hdr_cols:
+        # ── Column header row (green) ─────────────────────────────────────
+        _rh(current_row)
+        for col, label, h in [
+            (1,"Job #","center"),(3,"LOB","center"),
+            (4,"Lease Name/Number","center"),(5,"Customer","center"),
+            (6,"Co. Man","center"),(8,"Initials","center"),
+            (9,"Date","center"),(10,"Sent","center"),
+            (12,"Initials","center"),(13,"Date","center"),(14,"Accrue","center"),
+        ]:
             _c(current_row, col, label,
-               font=_font(bold=True), fill=GREEN_FILL,
-               border=hair_bottom, align=_align(h=h))
+               font=_f(bold=True), fill=GREEN_FILL,
+               bdr=_bdr(b=HAIR), align=_a(h=h))
         current_row += 1
 
-        # ── Job info row (gray) ────────────────────────────────────────────
-        ws.row_dimensions[current_row].height = 15.75
-        job_info = [
-            (1, job_num,                              "center"),
-            (3, lob_label,                            "center"),
-            (4, str(job.get("job_name","") or ""),    "left"),
-            (5, str(job.get("customer","") or ""),    "center"),
-            (6, str(job.get("company_man","") or ""), "center"),
-        ]
-        for col, val, h in job_info:
+        # ── Job info row (gray) ───────────────────────────────────────────
+        _rh(current_row)
+        for col, val, h in [
+            (1, job_num,                                  "center"),
+            (3, lob_label,                                "center"),
+            (4, str(job.get("job_name",  "") or ""),      "left"),
+            (5, str(job.get("customer",  "") or ""),      "center"),
+            (6, str(job.get("company_man","") or ""),     "center"),
+        ]:
             _c(current_row, col, val,
-               font=_font(), fill=GRAY_FILL,
-               border=med_bottom, align=_align(h=h))
+               font=_f(), fill=GRAY_FILL,
+               bdr=_bdr(b=MED), align=_a(h=h))
         current_row += 1
 
-        # ── Spacer row ─────────────────────────────────────────────────────
+        # ── Spacer row ────────────────────────────────────────────────────
         ws.row_dimensions[current_row].height = 6.75
         current_row += 1
 
-        # ── Line item header (green) ───────────────────────────────────────
-        ws.row_dimensions[current_row].height = 15.75
-        li_hdrs = [
-            (1,"Line #","center"), (4,"Description","center"),
-            (5,"UOM","center"),    (8,"Start","center"),
-            (9,"End","center"),    (10,"# of Days","center"),
-            (12,"Invoice Qty","center"), (13,"Price","center"),
-            (14,"Line Total","center"),
-        ]
-        for col, label, h in li_hdrs:
+        # ── Line item header row (green, A=gray per template) ─────────────
+        _rh(current_row)
+        for col, label, fill, h in [
+            (1,  "Line #",      GRAY_FILL,  "center"),
+            (3,  "Item Abbr.",  GREEN_FILL, "center"),
+            (4,  "Description", GREEN_FILL, "center"),
+            (5,  "UOM",         GREEN_FILL, "center"),
+            (8,  "Start",       GREEN_FILL, "center"),
+            (9,  "End",         GREEN_FILL, "center"),
+            (10, "# of Days",   GREEN_FILL, "center"),
+            (12, "Invoice Qty", GREEN_FILL, "center"),
+            (13, "Price",       GREEN_FILL, "center"),
+            (14, "Line Total",  GREEN_FILL, "center"),
+        ]:
+            bdr = _bdr(b=THIN) if fill == GRAY_FILL else _bdr(b=HAIR)
             _c(current_row, col, label,
-               font=_font(bold=True), fill=GREEN_FILL,
-               border=hair_bottom, align=_align(h=h))
-        # A col has gray fill in template for line # header
-        _c(current_row, 1, "Line #",
-           font=_font(bold=True), fill=GRAY_FILL,
-           border=thin_bottom, align=_align(h="center"))
+               font=_f(bold=True), fill=fill,
+               bdr=bdr, align=_a(h=h))
         current_row += 1
 
-        # ── Line item rows (gray) ──────────────────────────────────────────
+        # ── Line item rows (gray) ─────────────────────────────────────────
         job_total = 0.0
         if job_items.empty:
-            ws.row_dimensions[current_row].height = 15.75
-            _merge(current_row, 1, current_row, 14)
+            _rh(current_row)
+            _mg(current_row, 1, current_row, 14)
             _c(current_row, 1, "(No line items entered yet)",
-               font=_font(color="999999"), fill=GRAY_FILL,
-               align=_align(h="center"))
+               font=_f(color="999999"), fill=GRAY_FILL,
+               align=_a(h="center"))
             current_row += 1
         else:
             for li_num, li in enumerate(job_items.itertuples(), start=1):
-                ws.row_dimensions[current_row].height = 15.75
-
+                _rh(current_row)
                 days = None
-                if pd.notna(getattr(li,"start_date",None)) and pd.notna(getattr(li,"end_date",None)):
+                sd = getattr(li, "start_date", None)
+                ed = getattr(li, "end_date",   None)
+                if pd.notna(sd) and pd.notna(ed):
                     try:
-                        days = (pd.to_datetime(li.end_date) -
-                                pd.to_datetime(li.start_date)).days + 1
+                        days = (pd.to_datetime(ed) - pd.to_datetime(sd)).days + 1
                     except Exception:
-                        days = None
+                        pass
 
-                lt = _num(li.line_total)
-                qty   = _num(li.invoice_qty)
-                price = _num(li.unit_price)
-                if lt is None and qty is not None and price is not None:
-                    lt = qty * price
+                lt  = _num(li.line_total)
+                qty = _num(li.invoice_qty)
+                prc = _num(li.unit_price)
+                if lt is None and qty is not None and prc is not None:
+                    lt = qty * prc
                 if lt is not None:
                     job_total += lt
 
-                li_data = [
-                    (1,  li_num,   "center", None),
-                    (4,  str(li.description or ""), "left", None),
+                for col, val, h, fmt in [
+                    (1,  li_num,  "center", None),
+                    (4,  str(li.description or ""), "left",   None),
                     (5,  str(li.uom or ""),         "center", None),
-                    (8,  pd.to_datetime(li.start_date).date()
-                         if pd.notna(getattr(li,"start_date",None)) else None,
+                    (8,  pd.to_datetime(sd).date() if pd.notna(sd) else None,
                          "center", DATE_FMT),
-                    (9,  pd.to_datetime(li.end_date).date()
-                         if pd.notna(getattr(li,"end_date",None)) else None,
+                    (9,  pd.to_datetime(ed).date() if pd.notna(ed) else None,
                          "center", DATE_FMT),
-                    (10, days,     "center", None),
-                    (12, qty,      "center", NUM_FMT),
-                    (13, price,    "center", MONEY),
-                    (14, lt,       "right",  MONEY),
-                ]
-                for col, val, h, fmt in li_data:
+                    (10, days,    "center", None),
+                    (12, qty,     "center", NUM_FMT),
+                    (13, prc,     "center", MONEY),
+                    (14, lt,      "right",  MONEY),
+                ]:
                     _c(current_row, col, val,
-                       font=_font(), fill=GRAY_FILL,
-                       border=thin_bottom, align=_align(h=h),
-                       num_fmt=fmt)
+                       font=_f(), fill=GRAY_FILL,
+                       bdr=_bdr(b=THIN), align=_a(h=h), fmt=fmt)
                 current_row += 1
 
-        # ── Summary row ────────────────────────────────────────────────────
-        ws.row_dimensions[current_row].height = 15.75
-        summary_data = [
-            (3,  str(job.get("customer","") or ""),        "left"),
-            (4,  str(job.get("county_state","") or ""),    "left"),
-            (5,  str(job.get("invoice_number","") or ""),  "center"),
-            (6,  str(job.get("so_ticket_number","") or ""),"center"),
-            (12, _num(job.get("day_rate")),                "right"),
-            (14, job_total,                                "right"),
-        ]
-        for col, val, h in summary_data:
-            fmt = MONEY if col in (12, 14) else None
+        # ── Summary label row (green) ─────────────────────────────────────
+        _rh(current_row)
+        for col, label in [
+            (3,"Customer"),(4,"Lease County"),(5,"Invoice #"),
+            (6,"Ticket #"),(12,"Day Rate"),(14,"Job Total"),
+        ]:
+            _c(current_row, col, label,
+               font=_f(bold=True), fill=GREEN_FILL,
+               bdr=_bdr(b=HAIR), align=_a(h="center"))
+        current_row += 1
+
+        # ── Summary data row (gray) ───────────────────────────────────────
+        _rh(current_row)
+        for col, val, h, fmt in [
+            (3,  str(job.get("customer","")       or ""), "left",   None),
+            (4,  str(job.get("county_state","")   or ""), "left",   None),
+            (5,  str(job.get("invoice_number","") or ""), "center", None),
+            (6,  str(job.get("so_ticket_number","")or ""),"center", None),
+            (12, _num(job.get("day_rate")),               "right",  MONEY),
+            (14, job_total,                               "right",  MONEY),
+        ]:
             _c(current_row, col, val,
-               font=_font(bold=True), fill=GRAY_FILL,
-               border=med_bottom, align=_align(h=h),
-               num_fmt=fmt)
-        # Labels above values
-        for col, label in [(12,"Day Rate"),(14,"Job Total")]:
-            c = ws.cell(row=current_row, column=col)
-            # add label as comment-style — put it in the row above summary
-            pass
+               font=_f(bold=True), fill=GRAY_FILL,
+               bdr=_bdr(b=MED), align=_a(h=h), fmt=fmt)
         current_row += 2   # blank gap between jobs
 
         grand_total += job_total
         cust = str(job.get("customer","") or "Unassigned")
         customer_totals[cust] = customer_totals.get(cust, 0.0) + job_total
 
-    # ── Fill customer rollup panel (rows 3-49) ────────────────────────────────
-    panel_row = PANEL_START + 1
-    # LOB + projection on row 3
-    _c(panel_row, 1, lob_label,
-       font=_font(bold=True), fill=GRAY_FILL,
-       border=hair_bottom, align=_align(h="right"))
-    _c(panel_row, 3, grand_total,
-       font=_font(bold=True), fill=GRAY_FILL,
-       border=hair_bottom, align=_align(h="center"), num_fmt=MONEY)
-    panel_row += 1
+    # =========================================================================
+    # PASS 2 — fill customer rollup panel (rows 2-49) and check panel
+    # =========================================================================
 
+    # Row 2: panel headers
+    _rh(2)
+    for col, label, h in [(1,"LOB","right"),(3,"Projection","center"),
+                           (5,"Customer","left"),(6,"Total","center")]:
+        _c(2, col, label,
+           font=_f(bold=True), fill=GREEN_FILL,
+           bdr=_bdr(b=HAIR), align=_a(h=h))
+
+    # Row 3: LOB row + check panel start
+    _rh(3)
+    _c(3, 1, lob_label,
+       font=_f(bold=True), fill=GRAY_FILL,
+       bdr=_bdr(b=HAIR), align=_a(h="right"))
+    _c(3, 3, grand_total,
+       font=_f(bold=True), fill=GRAY_FILL,
+       bdr=_bdr(b=HAIR), align=_a(h="center"), fmt=MONEY)
+    # Check panel labels
+    _c(3, 12, "Check", font=_f(), align=_a(h="left"))
+
+    # Check panel: Revenue / Customer / Delta
+    _c(4, 12, "Revenue",   font=_f(), align=_a(h="left"))
+    _c(4, 13, grand_total, font=_f(), align=_a(h="right"), fmt=MONEY)
+    _c(5, 12, "Customer",  font=_f(), align=_a(h="left"))
+    _c(5, 13, grand_total, font=_f(), align=_a(h="right"), fmt=MONEY)
+    _c(6, 12, "Delta",     font=_f(), align=_a(h="left"))
+    _c(6, 13, 0.0,         font=_f(), align=_a(h="right"), fmt=MONEY)
+
+    # Customer list rows 4-49
+    panel_row = 4
     for cust, total in sorted(customer_totals.items()):
-        if panel_row > PANEL_END_ROW:
+        if panel_row > 49:
             break
-        ws.row_dimensions[panel_row].height = 15.75
+        _rh(panel_row)
         _c(panel_row, 5, cust,
-           font=_font(), fill=GRAY_FILL,
-           border=hair_bottom, align=_align(h="left"))
+           font=_f(), fill=GRAY_FILL,
+           bdr=_bdr(b=HAIR), align=_a(h="left"))
         _c(panel_row, 6, total,
-           font=_font(), fill=GRAY_FILL,
-           border=hair_bottom, align=_align(h="center"), num_fmt=MONEY)
+           font=_f(), fill=GRAY_FILL,
+           bdr=_bdr(b=HAIR), align=_a(h="center"), fmt=MONEY)
         panel_row += 1
 
-    # Grand total line in panel
-    if panel_row <= PANEL_END_ROW:
+    # Grand total row in panel
+    if panel_row <= 49:
+        _rh(panel_row)
         _c(panel_row, 5, "TOTAL",
-           font=_font(bold=True), fill=GREEN_FILL,
-           border=hair_bottom, align=_align(h="left"))
+           font=_f(bold=True), fill=GREEN_FILL,
+           bdr=_bdr(b=HAIR), align=_a(h="left"))
         _c(panel_row, 6, grand_total,
-           font=_font(bold=True), fill=GREEN_FILL,
-           border=hair_bottom, align=_align(h="center"), num_fmt=MONEY)
+           font=_f(bold=True), fill=GREEN_FILL,
+           bdr=_bdr(b=HAIR), align=_a(h="center"), fmt=MONEY)
+
+    # Total line below panel (row 49 of original)
+    _c(49, 6, grand_total,
+       font=_f(bold=True), fill=GRAY_FILL,
+       bdr=_bdr(b=MED), align=_a(h="right"), fmt=MONEY)
 
     ws.freeze_panes = "A51"
 
-    # ── Summary sheet ─────────────────────────────────────────────────────────
+    # =========================================================================
+    # PASS 3 — Summary sheet
+    # =========================================================================
+    from datetime import datetime as _dt
     today = _date.today()
     try:
-        from datetime import datetime as _dt
         month_dt = _dt.strptime(month_label, "%B %Y")
         report_month, report_year = month_dt.month, month_dt.year
     except Exception:
         report_month, report_year = today.month, today.year
 
     days_in_month = calendar.monthrange(report_year, report_month)[1]
-    days_elapsed  = today.day if (report_month == today.month and
-                                   report_year == today.year) else days_in_month
+    days_elapsed  = (today.day
+                     if report_month == today.month and report_year == today.year
+                     else days_in_month)
 
     ss = wb.create_sheet("Summary")
-    for col, w in [("A",28),("B",18),("C",14),("D",18),("E",18),("F",16)]:
+    for col, w in [("A",28),("B",18),("C",14),
+                   ("D",18),("E",18),("F",16)]:
         ss.column_dimensions[col].width = w
 
     # Title
     ss.merge_cells("A1:F1")
     c = ss["A1"]
     c.value = f"{lob_label}  —  Monthly Summary  |  {month_label}"
-    c.font  = _font(bold=True, size=12, color="FFFFFF")
+    c.font  = _f(bold=True, size=12, color="FFFFFF")
     c.fill  = GREEN_FILL
-    c.alignment = _align(h="center")
+    c.alignment = _a(h="center")
     ss.row_dimensions[1].height = 22
 
     # Metadata
@@ -472,62 +483,62 @@ def build_revenue_excel(jobs_df: pd.DataFrame, line_items_df: pd.DataFrame,
     c = ss["A2"]
     c.value = (f"Days Elapsed: {days_elapsed}  of  {days_in_month}"
                f"  |  Generated: {today.strftime('%m/%d/%Y')}")
-    c.font  = _font(color="444444")
-    c.alignment = _align(h="center")
+    c.font  = _f(color="444444")
+    c.alignment = _a(h="center")
     ss.row_dimensions[2].height = 16
 
     # Column headers
-    for col_i, label in enumerate(
+    for ci, label in enumerate(
         ["Customer","Actual Total","Days Elapsed",
          "Daily Run Rate","Projected Total","Variance"], start=1):
-        c = ss.cell(row=3, column=col_i, value=label)
-        c.font   = _font(bold=True, color="FFFFFF")
+        c = ss.cell(row=3, column=ci, value=label)
+        c.font   = _f(bold=True, color="FFFFFF")
         c.fill   = GREEN_FILL
-        c.border = _border(bottom=THIN)
-        c.alignment = _align(h="center")
+        c.border = _bdr(b=THIN)
+        c.alignment = _a(h="center")
     ss.row_dimensions[3].height = 22
 
     # Customer rows
-    for r_i, (cust, actual) in enumerate(sorted(customer_totals.items()), start=4):
+    for ri, (cust, actual) in enumerate(sorted(customer_totals.items()), start=4):
         run_rate  = actual / days_elapsed if days_elapsed > 0 else 0.0
         projected = run_rate * days_in_month
         variance  = projected - actual
-        ss.row_dimensions[r_i].height = 15.75
-        for col_i, val, fmt, h, bold, color in [
-            (1, cust,      None,   "left",  False, "000000"),
-            (2, actual,    MONEY,  "right", False, "000000"),
-            (3, days_elapsed, "0","center", False, "000000"),
-            (4, run_rate,  MONEY,  "right", False, "000000"),
-            (5, projected, MONEY,  "right", False, "000000"),
-            (6, variance,  MONEY,  "right", True,
+        ss.row_dimensions[ri].height = 15.75
+        for ci, val, fmt, h, bold, color in [
+            (1, cust,       None,  "left",   False, "000000"),
+            (2, actual,     MONEY, "right",  False, "000000"),
+            (3, days_elapsed,"0",  "center", False, "000000"),
+            (4, run_rate,   MONEY, "right",  False, "000000"),
+            (5, projected,  MONEY, "right",  False, "000000"),
+            (6, variance,   MONEY, "right",  True,
              "375623" if variance >= 0 else "9C0006"),
         ]:
-            c = ss.cell(row=r_i, column=col_i, value=val)
-            c.font   = _font(bold=bold, color=color)
+            c = ss.cell(row=ri, column=ci, value=val)
+            c.font   = _f(bold=bold, color=color)
             c.fill   = GRAY_FILL
-            c.border = _border(bottom=HAIR)
-            c.alignment = _align(h=h)
+            c.border = _bdr(b=HAIR)
+            c.alignment = _a(h=h)
             if fmt: c.number_format = fmt
 
     # Grand total
     tr = 4 + len(customer_totals)
     ss.row_dimensions[tr].height = 18
-    gr  = grand_total / days_elapsed if days_elapsed > 0 else 0.0
-    gp  = gr * days_in_month
-    gv  = gp - grand_total
-    for col_i, val, fmt, h in [
-        (1, "TOTAL",       None,  "left"),
-        (2, grand_total,   MONEY, "right"),
-        (3, days_elapsed,  "0",   "center"),
-        (4, gr,            MONEY, "right"),
-        (5, gp,            MONEY, "right"),
-        (6, gv,            MONEY, "right"),
+    gr = grand_total / days_elapsed if days_elapsed > 0 else 0.0
+    gp = gr * days_in_month
+    gv = gp - grand_total
+    for ci, val, fmt, h in [
+        (1, "TOTAL",      None,  "left"),
+        (2, grand_total,  MONEY, "right"),
+        (3, days_elapsed, "0",   "center"),
+        (4, gr,           MONEY, "right"),
+        (5, gp,           MONEY, "right"),
+        (6, gv,           MONEY, "right"),
     ]:
-        c = ss.cell(row=tr, column=col_i, value=val)
-        c.font   = _font(bold=True, color="FFFFFF")
+        c = ss.cell(row=tr, column=ci, value=val)
+        c.font   = _f(bold=True, color="FFFFFF")
         c.fill   = GREEN_FILL
-        c.border = _border(bottom=MED)
-        c.alignment = _align(h=h)
+        c.border = _bdr(b=MED)
+        c.alignment = _a(h=h)
         if fmt: c.number_format = fmt
 
     ss.freeze_panes = "A4"
