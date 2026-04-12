@@ -2844,24 +2844,62 @@ def render_bidding_tab(engine):
 
         # ── Bid header form ───────────────────────────────────────────────
         st.markdown("##### Bid Details")
-        hf1, hf2, hf3 = st.columns(3)
+        hf1, hf2 = st.columns(2)
         bid_name = hf1.text_input(
             "Bid Name / Job Description",
             value=str(existing["bid_name"] if existing is not None else ""),
             key="bb_bid_name",
         )
-        cust_options = customers if customers else ["Standard"]
-        cust_default = str(existing["customer"]) if existing is not None else "Standard"
-        cust_idx = cust_options.index(cust_default) if cust_default in cust_options else 0
-        bid_customer = hf2.selectbox("Customer", cust_options,
-                                     index=cust_idx, key="bb_customer")
-        bid_status = hf3.selectbox(
+        bid_status = hf2.selectbox(
             "Status", STATUS_OPTIONS,
             index=STATUS_OPTIONS.index(str(existing["status"]))
                   if existing is not None else 0,
             key="bb_status",
         )
 
+        # ── Customer + Rate Card (intentionally separate) ─────────────────
+        st.markdown("**Customer & Pricing**")
+        cc1, cc2 = st.columns(2)
+
+        # Customer: free-text, flows to jobs/tickets/revenue tabs as-is
+        bid_customer = cc1.text_input(
+            "Customer",
+            value=str(existing["customer"] if existing is not None else ""),
+            key="bb_customer",
+            placeholder="Type the actual customer name…",
+            help="This is the customer name used across all tabs (Jobs, Revenue, Tickets). "                 "It does not need to match a rate card.",
+        )
+
+        # Rate Card: which pricing table to apply — independent of customer name
+        rc_names = get_customers_with_rate_cards(engine)
+        existing_rc = (str(existing["rate_card"]) if existing is not None
+                       and "rate_card" in existing.index
+                       and existing["rate_card"] else "")
+        # Auto-suggest: if customer name matches a rate card, pre-select it
+        if not existing_rc and bid_customer.strip() in rc_names:
+            existing_rc = bid_customer.strip()
+        rc_idx = rc_names.index(existing_rc) if existing_rc in rc_names else 0
+
+        bid_rate_card = cc2.selectbox(
+            "Rate Card",
+            rc_names if rc_names else ["Standard"],
+            index=rc_idx,
+            key="bb_rate_card",
+            help="Which customer's pricing to apply. Use Standard for customers "                 "without a custom rate card. This does not affect the customer "                 "name shown in other tabs.",
+        )
+
+        # Helpful feedback
+        customer_has_rc = bid_customer.strip() in rc_names
+        if bid_customer.strip() and not customer_has_rc:
+            cc1.caption(
+                f"ℹ️ No rate card for **{bid_customer.strip()}** — "                f"using **{bid_rate_card}** pricing."
+            )
+        elif customer_has_rc and bid_rate_card != bid_customer.strip():
+            cc2.caption(
+                f"ℹ️ {bid_customer.strip()} has a rate card — "                f"currently using **{bid_rate_card}** instead."
+            )
+
+        # ── Billing type + bid parameters ─────────────────────────────────
         hf4, hf5, hf6 = st.columns(3)
         billing_type = hf4.selectbox(
             "Billing Type",
@@ -2885,7 +2923,7 @@ def render_bidding_tab(engine):
         )
 
         # ── Crew / shift parameters ───────────────────────────────────────
-        st.markdown("##### Crew & Shift Parameters")
+        st.markdown("**Crew & Shift**")
         cf1, cf2, cf3, cf4, cf5 = st.columns(5)
         hrs_per_shift = cf1.number_input(
             "Hrs / Shift", min_value=1.0, max_value=24.0, step=0.5,
@@ -2919,6 +2957,7 @@ def render_bidding_tab(engine):
                 "id":               sel_bid_id,
                 "bid_name":         bid_name,
                 "customer":         bid_customer,
+                "rate_card":        bid_rate_card,
                 "region_code":      None,
                 "billing_type":     billing_type,
                 "status":           bid_status,
