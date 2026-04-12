@@ -2844,6 +2844,45 @@ def render_bidding_tab(engine):
 
         # ── Bid header form ───────────────────────────────────────────────
         st.markdown("##### Bid Details")
+
+        # ── Customer + Rate Card (intentionally separate, shown first) ────
+        cc1, cc2 = st.columns(2)
+
+        bid_customer = cc1.text_input(
+            "Customer",
+            value=str(existing["customer"] if existing is not None else ""),
+            key="bb_customer",
+            placeholder="Type the actual customer name…",
+            help="Customer name used across all tabs (Jobs, Revenue, Tickets). "                 "Does not need to match a rate card.",
+        )
+
+        rc_names = get_customers_with_rate_cards(engine)
+        existing_rc = (str(existing["rate_card"]) if existing is not None
+                       and "rate_card" in existing.index
+                       and existing["rate_card"] else "")
+        if not existing_rc and bid_customer.strip() in rc_names:
+            existing_rc = bid_customer.strip()
+        rc_idx = rc_names.index(existing_rc) if existing_rc in rc_names else 0
+
+        bid_rate_card = cc2.selectbox(
+            "Rate Card",
+            rc_names if rc_names else ["Standard"],
+            index=rc_idx,
+            key="bb_rate_card",
+            help="Pricing to apply for this bid. Use Standard for customers "                 "without a custom rate card.",
+        )
+
+        customer_has_rc = bid_customer.strip() in rc_names
+        if bid_customer.strip() and not customer_has_rc:
+            cc1.caption(
+                f"ℹ️ No rate card for **{bid_customer.strip()}** — "                f"using **{bid_rate_card}** pricing."
+            )
+        elif customer_has_rc and bid_rate_card != bid_customer.strip():
+            cc2.caption(
+                f"ℹ️ {bid_customer.strip()} has a rate card — "                f"currently using **{bid_rate_card}** instead."
+            )
+
+        # ── Bid Name / Status ─────────────────────────────────────────────
         hf1, hf2 = st.columns(2)
         bid_name = hf1.text_input(
             "Bid Name / Job Description",
@@ -2856,48 +2895,6 @@ def render_bidding_tab(engine):
                   if existing is not None else 0,
             key="bb_status",
         )
-
-        # ── Customer + Rate Card (intentionally separate) ─────────────────
-        st.markdown("**Customer & Pricing**")
-        cc1, cc2 = st.columns(2)
-
-        # Customer: free-text, flows to jobs/tickets/revenue tabs as-is
-        bid_customer = cc1.text_input(
-            "Customer",
-            value=str(existing["customer"] if existing is not None else ""),
-            key="bb_customer",
-            placeholder="Type the actual customer name…",
-            help="This is the customer name used across all tabs (Jobs, Revenue, Tickets). "                 "It does not need to match a rate card.",
-        )
-
-        # Rate Card: which pricing table to apply — independent of customer name
-        rc_names = get_customers_with_rate_cards(engine)
-        existing_rc = (str(existing["rate_card"]) if existing is not None
-                       and "rate_card" in existing.index
-                       and existing["rate_card"] else "")
-        # Auto-suggest: if customer name matches a rate card, pre-select it
-        if not existing_rc and bid_customer.strip() in rc_names:
-            existing_rc = bid_customer.strip()
-        rc_idx = rc_names.index(existing_rc) if existing_rc in rc_names else 0
-
-        bid_rate_card = cc2.selectbox(
-            "Rate Card",
-            rc_names if rc_names else ["Standard"],
-            index=rc_idx,
-            key="bb_rate_card",
-            help="Which customer's pricing to apply. Use Standard for customers "                 "without a custom rate card. This does not affect the customer "                 "name shown in other tabs.",
-        )
-
-        # Helpful feedback
-        customer_has_rc = bid_customer.strip() in rc_names
-        if bid_customer.strip() and not customer_has_rc:
-            cc1.caption(
-                f"ℹ️ No rate card for **{bid_customer.strip()}** — "                f"using **{bid_rate_card}** pricing."
-            )
-        elif customer_has_rc and bid_rate_card != bid_customer.strip():
-            cc2.caption(
-                f"ℹ️ {bid_customer.strip()} has a rate card — "                f"currently using **{bid_rate_card}** instead."
-            )
 
         # ── Billing type + bid parameters ─────────────────────────────────
         hf4, hf5, hf6 = st.columns(3)
