@@ -2450,7 +2450,11 @@ with tab_revenue:
 
         # Row 1: Invoice / billing fields
         bf1, bf2, bf3, bf4 = st.columns([1.5, 1.5, 1.5, 0.8])
-        b_company_man    = bf1.text_input("Company Man",    value=str(sel_job.get("company_man",     "") or ""), key=f"rev_cm_{selected_rev_job_id}")
+        # "Company Man" on revenue sheet = "Ordered By" on ticket — same field
+        b_ordered_by     = bf1.text_input("Company Man / Ordered By",
+                                          value=str(sel_job.get("ordered_by", "") or ""),
+                                          key=f"rev_ob_{selected_rev_job_id}",
+                                          help="Shown as 'Co. Man' on revenue report and 'Ordered By' on field ticket.")
         b_invoice_number = bf2.text_input("Invoice #",     value=str(sel_job.get("invoice_number",  "") or ""), key=f"rev_inv_{selected_rev_job_id}")
         b_so_ticket      = bf3.text_input("SO / Ticket #", value=str(sel_job.get("so_ticket_number","") or ""), key=f"rev_so_{selected_rev_job_id}")
         b_accrue_raw = sel_job.get("accrue")
@@ -2461,26 +2465,25 @@ with tab_revenue:
         )
 
         # Row 2: Field ticket fields
-        tf1, tf2, tf3, tf4 = st.columns(4)
+        tf1, tf2, tf3 = st.columns(3)
         b_ees_supervisor = tf1.text_input("EES Supervisor", value=str(sel_job.get("ees_supervisor", "") or ""), key=f"rev_sup_{selected_rev_job_id}")
         b_customer_po    = tf2.text_input("Customer PO",    value=str(sel_job.get("customer_po",    "") or ""), key=f"rev_po_{selected_rev_job_id}")
         b_county_state   = tf3.text_input("County & State", value=str(sel_job.get("county_state",   "") or ""), key=f"rev_cs_{selected_rev_job_id}")
-        b_ordered_by     = tf4.text_input("Ordered By",     value=str(sel_job.get("ordered_by",     "") or ""), key=f"rev_ob_{selected_rev_job_id}")
 
-        tf5, tf6, tf7 = st.columns(3)
-        b_well_name      = tf5.text_input("Well Name",      value=str(sel_job.get("well_name",      "") or ""), key=f"rev_wn_{selected_rev_job_id}")
-        b_well_number    = tf6.text_input("Well Number",    value=str(sel_job.get("well_number",    "") or ""), key=f"rev_wnr_{selected_rev_job_id}")
-        b_department     = tf7.text_input("Department",     value=str(sel_job.get("department",     "") or ""), key=f"rev_dept_{selected_rev_job_id}")
+        tf4, tf5, tf6 = st.columns(3)
+        b_well_name      = tf4.text_input("Well Name",      value=str(sel_job.get("well_name",      "") or ""), key=f"rev_wn_{selected_rev_job_id}")
+        b_well_number    = tf5.text_input("Well Number",    value=str(sel_job.get("well_number",    "") or ""), key=f"rev_wnr_{selected_rev_job_id}")
+        b_department     = tf6.text_input("Department",     value=str(sel_job.get("department",     "") or ""), key=f"rev_dept_{selected_rev_job_id}")
 
         b_job_description = st.text_input(
-            'Job Description (appears on ticket, e.g. 6'' Layflat Rental)',
+            "Job Description (appears on ticket)",
             value=str(sel_job.get("job_description", "") or ""),
             key=f"rev_jd_{selected_rev_job_id}",
         )
 
         if st.button("💾 Save Billing Info", key=f"rev_save_billing_{selected_rev_job_id}"):
             update_job_billing(engine, int(selected_rev_job_id), {
-                "company_man":      b_company_man,
+                "ordered_by":       b_ordered_by,
                 "invoice_number":   b_invoice_number,
                 "so_ticket_number": b_so_ticket,
                 "billing_type":     b_billing_type,
@@ -2490,7 +2493,6 @@ with tab_revenue:
                 "county_state":     b_county_state,
                 "well_name":        b_well_name,
                 "well_number":      b_well_number,
-                "ordered_by":       b_ordered_by,
                 "department":       b_department,
                 "job_description":  b_job_description,
             })
@@ -2502,21 +2504,59 @@ with tab_revenue:
         # ── Line item editor ──────────────────────────────────────────────────
         st.markdown("##### Line Items")
 
+        # Guidance changes based on billing method
+        if b_billing_type == "line_item":
+            st.caption(
+                "**Line Item billing:** Enter each setup, day rate, and demob charge as a separate row. "                "Setup dated day before job start, demob dated day after job end."
+            )
+        elif b_billing_type == "day_rate":
+            st.caption(
+                "**Day Rate billing:** Enter 3 rows — Setup (Ea, 1 unit), "                "Day Rate (Day, × number of days), Demob (Ea, 1 unit)."
+            )
+        elif b_billing_type == "per_bbl":
+            st.caption(
+                "**Per BBL billing:** Enter 1 row — description, BBL as UOM, "                "total BBLs as qty, per-BBL price as unit price."
+            )
+
         existing_li = get_line_items_df(engine, job_id=int(selected_rev_job_id))
 
-        UOM_OPTIONS = ["Day", "Ea", "Gal", "BBL", "MMBTU", "Ton", "Hour", "Month", "Ft", "Mile", ""]
+        UOM_OPTIONS = ["Day", "Ea", "BBL", "Gal", "MMBTU", "Ton", "Hour", "Month", "Ft", "Mile", ""]
 
+        # Default rows depend on billing method
         if existing_li.empty:
-            editor_base = pd.DataFrame({
-                "Description": [""] * 5,
-                "UOM":         ["Day"] * 5,
-                "Start":       [None] * 5,
-                "End":         [None] * 5,
-                "Invoice Qty": [None] * 5,
-                "Unit Price":  [None] * 5,
-                "Line Total":  [None] * 5,
-                "Notes":       [""] * 5,
-            })
+            if b_billing_type == "day_rate":
+                editor_base = pd.DataFrame({
+                    "Description": ["Setup", "Day Rate", "Demob"],
+                    "UOM":         ["Ea", "Day", "Ea"],
+                    "Start":       [None, None, None],
+                    "End":         [None, None, None],
+                    "Invoice Qty": [1.0, None, 1.0],
+                    "Unit Price":  [None, None, None],
+                    "Line Total":  [None, None, None],
+                    "Notes":       ["", "", ""],
+                })
+            elif b_billing_type == "per_bbl":
+                editor_base = pd.DataFrame({
+                    "Description": ["Water Transfer — Per BBL"],
+                    "UOM":         ["BBL"],
+                    "Start":       [None],
+                    "End":         [None],
+                    "Invoice Qty": [None],
+                    "Unit Price":  [None],
+                    "Line Total":  [None],
+                    "Notes":       [""],
+                })
+            else:
+                editor_base = pd.DataFrame({
+                    "Description": [""] * 5,
+                    "UOM":         ["Day"] * 5,
+                    "Start":       [None] * 5,
+                    "End":         [None] * 5,
+                    "Invoice Qty": [None] * 5,
+                    "Unit Price":  [None] * 5,
+                    "Line Total":  [None] * 5,
+                    "Notes":       [""] * 5,
+                })
         else:
             editor_base = pd.DataFrame({
                 "Description": existing_li["description"].fillna("").tolist(),
@@ -2615,7 +2655,7 @@ with tab_revenue:
                 "Job Code":    j["job_code"],
                 "Job Name":    j["job_name"],
                 "Customer":    str(j.get("customer", "") or "—"),
-                "Company Man": str(j.get("company_man", "") or "—"),
+                "Co. Man":     str(j.get("ordered_by",  "") or "—"),
                 "Invoice #":   str(j.get("invoice_number", "") or "—"),
                 "Day Rate":    f"${float(j['day_rate']):,.2f}" if j.get("day_rate") and not pd.isna(j["day_rate"]) else "—",
                 "Job Total":   f"${jt:,.2f}",
