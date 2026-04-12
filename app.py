@@ -2430,19 +2430,31 @@ with tab_revenue:
 
         # ── Billing fields ────────────────────────────────────────────────────
         st.markdown("##### Billing Info")
+
+        # Billing type — drives how line items are entered and how ticket is built
+        BILLING_TYPE_LABELS = {
+            "line_item": "Line Item (itemized setup, day rate, demob)",
+            "day_rate":  "Day Rate (setup + single day rate + demob)",
+            "per_bbl":   "Per BBL (fixed per-barrel price)",
+        }
+        existing_billing_type = str(sel_job.get("billing_type", "") or "line_item")
+        if existing_billing_type not in BILLING_TYPE_LABELS:
+            existing_billing_type = "line_item"
+        b_billing_type = st.selectbox(
+            "Billing Method",
+            list(BILLING_TYPE_LABELS.keys()),
+            format_func=lambda x: BILLING_TYPE_LABELS[x],
+            index=list(BILLING_TYPE_LABELS.keys()).index(existing_billing_type),
+            key=f"rev_billing_type_{selected_rev_job_id}",
+        )
+
         # Row 1: Invoice / billing fields
-        bf1, bf2, bf3, bf4, bf5 = st.columns([1.5, 1.5, 1.5, 1.2, 0.8])
+        bf1, bf2, bf3, bf4 = st.columns([1.5, 1.5, 1.5, 0.8])
         b_company_man    = bf1.text_input("Company Man",    value=str(sel_job.get("company_man",     "") or ""), key=f"rev_cm_{selected_rev_job_id}")
         b_invoice_number = bf2.text_input("Invoice #",     value=str(sel_job.get("invoice_number",  "") or ""), key=f"rev_inv_{selected_rev_job_id}")
         b_so_ticket      = bf3.text_input("SO / Ticket #", value=str(sel_job.get("so_ticket_number","") or ""), key=f"rev_so_{selected_rev_job_id}")
-        b_day_rate_raw   = sel_job.get("day_rate")
-        b_day_rate       = bf4.number_input(
-            "Day Rate ($)", min_value=0.0,
-            value=float(b_day_rate_raw) if b_day_rate_raw is not None and not pd.isna(b_day_rate_raw) else 0.0,
-            step=0.01, format="%.2f", key=f"rev_dr_{selected_rev_job_id}",
-        )
         b_accrue_raw = sel_job.get("accrue")
-        b_accrue = bf5.checkbox(
+        b_accrue = bf4.checkbox(
             "Accrue",
             value=bool(b_accrue_raw) if b_accrue_raw is not None else False,
             key=f"rev_accrue_{selected_rev_job_id}",
@@ -2471,7 +2483,7 @@ with tab_revenue:
                 "company_man":      b_company_man,
                 "invoice_number":   b_invoice_number,
                 "so_ticket_number": b_so_ticket,
-                "day_rate":         float(b_day_rate),
+                "billing_type":     b_billing_type,
                 "accrue":           bool(b_accrue),
                 "ees_supervisor":   b_ees_supervisor,
                 "customer_po":      b_customer_po,
@@ -2844,59 +2856,24 @@ def render_bidding_tab(engine):
 
         # ── Bid header form ───────────────────────────────────────────────
         st.markdown("##### Bid Details")
-
-        # ── Customer + Rate Card (intentionally separate, shown first) ────
-        cc1, cc2 = st.columns(2)
-
-        bid_customer = cc1.text_input(
-            "Customer",
-            value=str(existing["customer"] if existing is not None else ""),
-            key="bb_customer",
-            placeholder="Type the actual customer name…",
-            help="Customer name used across all tabs (Jobs, Revenue, Tickets). "                 "Does not need to match a rate card.",
-        )
-
-        rc_names = get_customers_with_rate_cards(engine)
-        existing_rc = (str(existing["rate_card"]) if existing is not None
-                       and "rate_card" in existing.index
-                       and existing["rate_card"] else "")
-        if not existing_rc and bid_customer.strip() in rc_names:
-            existing_rc = bid_customer.strip()
-        rc_idx = rc_names.index(existing_rc) if existing_rc in rc_names else 0
-
-        bid_rate_card = cc2.selectbox(
-            "Rate Card",
-            rc_names if rc_names else ["Standard"],
-            index=rc_idx,
-            key="bb_rate_card",
-            help="Pricing to apply for this bid. Use Standard for customers "                 "without a custom rate card.",
-        )
-
-        customer_has_rc = bid_customer.strip() in rc_names
-        if bid_customer.strip() and not customer_has_rc:
-            cc1.caption(
-                f"ℹ️ No rate card for **{bid_customer.strip()}** — "                f"using **{bid_rate_card}** pricing."
-            )
-        elif customer_has_rc and bid_rate_card != bid_customer.strip():
-            cc2.caption(
-                f"ℹ️ {bid_customer.strip()} has a rate card — "                f"currently using **{bid_rate_card}** instead."
-            )
-
-        # ── Bid Name / Status ─────────────────────────────────────────────
-        hf1, hf2 = st.columns(2)
+        hf1, hf2, hf3 = st.columns(3)
         bid_name = hf1.text_input(
             "Bid Name / Job Description",
             value=str(existing["bid_name"] if existing is not None else ""),
             key="bb_bid_name",
         )
-        bid_status = hf2.selectbox(
+        cust_options = customers if customers else ["Standard"]
+        cust_default = str(existing["customer"]) if existing is not None else "Standard"
+        cust_idx = cust_options.index(cust_default) if cust_default in cust_options else 0
+        bid_customer = hf2.selectbox("Customer", cust_options,
+                                     index=cust_idx, key="bb_customer")
+        bid_status = hf3.selectbox(
             "Status", STATUS_OPTIONS,
             index=STATUS_OPTIONS.index(str(existing["status"]))
                   if existing is not None else 0,
             key="bb_status",
         )
 
-        # ── Billing type + bid parameters ─────────────────────────────────
         hf4, hf5, hf6 = st.columns(3)
         billing_type = hf4.selectbox(
             "Billing Type",
@@ -2920,7 +2897,7 @@ def render_bidding_tab(engine):
         )
 
         # ── Crew / shift parameters ───────────────────────────────────────
-        st.markdown("**Crew & Shift**")
+        st.markdown("##### Crew & Shift Parameters")
         cf1, cf2, cf3, cf4, cf5 = st.columns(5)
         hrs_per_shift = cf1.number_input(
             "Hrs / Shift", min_value=1.0, max_value=24.0, step=0.5,
@@ -2954,7 +2931,6 @@ def render_bidding_tab(engine):
                 "id":               sel_bid_id,
                 "bid_name":         bid_name,
                 "customer":         bid_customer,
-                "rate_card":        bid_rate_card,
                 "region_code":      None,
                 "billing_type":     billing_type,
                 "status":           bid_status,
