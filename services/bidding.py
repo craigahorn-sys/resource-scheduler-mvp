@@ -302,6 +302,7 @@ def migrate_bidding(engine):
             id                BIGSERIAL PRIMARY KEY,
             bid_name          TEXT NOT NULL,
             customer          TEXT NOT NULL,
+            rate_card         TEXT,
             region_code       TEXT REFERENCES regions(region_code),
             billing_type      TEXT NOT NULL DEFAULT 'line_item'
                               CHECK (billing_type IN ('line_item','day_rate','per_bbl')),
@@ -335,6 +336,16 @@ def migrate_bidding(engine):
         )
         """,
     ]
+
+    # Add rate_card column to existing bids tables (safe if already exists)
+    with engine.begin() as conn:
+        try:
+            from sqlalchemy import text as _text
+            conn.execute(_text(
+                "ALTER TABLE bids ADD COLUMN IF NOT EXISTS rate_card TEXT"
+            ))
+        except Exception:
+            pass
 
     for ddl in ddl_statements:
         with engine.begin() as conn:
@@ -487,7 +498,7 @@ def get_bid_items(engine, bid_id: int) -> pd.DataFrame:
         JOIN bids b ON b.id = bi.bid_id
         LEFT JOIN customer_rate_cards rc
                ON rc.item_id = bi.item_id
-              AND rc.customer_name = b.customer
+              AND rc.customer_name = COALESCE(b.rate_card, b.customer)
         WHERE bi.bid_id = :bid_id
         ORDER BY c.sort_order, c.name
     """, {"bid_id": bid_id})
@@ -499,7 +510,7 @@ def save_bid(engine, data: dict) -> int:
     if data.get("id"):
         execute(engine, """
             UPDATE bids SET
-                bid_name=:bid_name, customer=:customer,
+                bid_name=:bid_name, customer=:customer, rate_card=:rate_card,
                 region_code=:region_code, billing_type=:billing_type,
                 status=:status, bid_days=:bid_days, total_bbls=:total_bbls,
                 hrs_per_shift=:hrs_per_shift,
@@ -514,12 +525,12 @@ def save_bid(engine, data: dict) -> int:
         with engine.begin() as conn:
             row = conn.execute(text("""
                 INSERT INTO bids
-                    (bid_name, customer, region_code, billing_type, status,
+                    (bid_name, customer, rate_card, region_code, billing_type, status,
                      bid_days, total_bbls, hrs_per_shift,
                      labor_general, labor_lead, labor_supervisor, trucks,
                      day_rate_override, notes)
                 VALUES
-                    (:bid_name, :customer, :region_code, :billing_type, :status,
+                    (:bid_name, :customer, :rate_card, :region_code, :billing_type, :status,
                      :bid_days, :total_bbls, :hrs_per_shift,
                      :labor_general, :labor_lead, :labor_supervisor, :trucks,
                      :day_rate_override, :notes)
