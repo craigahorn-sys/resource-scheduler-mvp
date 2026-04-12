@@ -315,8 +315,11 @@ def migrate_bidding(engine):
             labor_lead        INTEGER NOT NULL DEFAULT 0,
             labor_supervisor  INTEGER NOT NULL DEFAULT 0,
             trucks            INTEGER NOT NULL DEFAULT 0,
-            day_rate_override NUMERIC,
-            notes             TEXT,
+            day_rate_override  NUMERIC,
+            setup_override     NUMERIC,
+            demob_override     NUMERIC,
+            per_bbl_override   NUMERIC,
+            notes              TEXT,
             job_id            BIGINT REFERENCES jobs(id) ON DELETE SET NULL,
             created_at        TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
             updated_at        TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
@@ -343,6 +346,15 @@ def migrate_bidding(engine):
             from sqlalchemy import text as _text
             conn.execute(_text(
                 "ALTER TABLE bids ADD COLUMN IF NOT EXISTS rate_card TEXT"
+            ))
+            conn.execute(_text(
+                "ALTER TABLE bids ADD COLUMN IF NOT EXISTS setup_override NUMERIC"
+            ))
+            conn.execute(_text(
+                "ALTER TABLE bids ADD COLUMN IF NOT EXISTS demob_override NUMERIC"
+            ))
+            conn.execute(_text(
+                "ALTER TABLE bids ADD COLUMN IF NOT EXISTS per_bbl_override NUMERIC"
             ))
         except Exception:
             pass
@@ -516,7 +528,11 @@ def save_bid(engine, data: dict) -> int:
                 hrs_per_shift=:hrs_per_shift,
                 labor_general=:labor_general, labor_lead=:labor_lead,
                 labor_supervisor=:labor_supervisor, trucks=:trucks,
-                day_rate_override=:day_rate_override, notes=:notes,
+                day_rate_override=:day_rate_override,
+                setup_override=:setup_override,
+                demob_override=:demob_override,
+                per_bbl_override=:per_bbl_override,
+                notes=:notes,
                 updated_at=CURRENT_TIMESTAMP
             WHERE id=:id
         """, data)
@@ -528,12 +544,14 @@ def save_bid(engine, data: dict) -> int:
                     (bid_name, customer, rate_card, region_code, billing_type, status,
                      bid_days, total_bbls, hrs_per_shift,
                      labor_general, labor_lead, labor_supervisor, trucks,
-                     day_rate_override, notes)
+                     day_rate_override, setup_override, demob_override,
+                     per_bbl_override, notes)
                 VALUES
                     (:bid_name, :customer, :rate_card, :region_code, :billing_type, :status,
                      :bid_days, :total_bbls, :hrs_per_shift,
                      :labor_general, :labor_lead, :labor_supervisor, :trucks,
-                     :day_rate_override, :notes)
+                     :day_rate_override, :setup_override, :demob_override,
+                     :per_bbl_override, :notes)
                 RETURNING id
             """), data).fetchone()
             return row[0]
@@ -740,12 +758,14 @@ def bid_to_job_line_items(bid: pd.Series, calc: dict,
             ln += 1
 
     elif btype == "day_rate":
-        dr = float(bid.get("day_rate_override") or calc["day_total"])
+        dr    = float(bid.get("day_rate_override")  or calc["day_total"])
+        setup = float(bid.get("setup_override")      or calc["setup_total"])
+        demob = float(bid.get("demob_override")      or calc["demob_total"])
         lines = [
             {"line_number": 1, "description": "Setup",
              "uom": "Ea", "invoice_qty": 1,
-             "unit_price": calc["setup_total"],
-             "line_total": calc["setup_total"],
+             "unit_price": setup,
+             "line_total": setup,
              "start_date": None, "end_date": None, "notes": "Setup"},
             {"line_number": 2, "description": "Day Rate",
              "uom": "Day", "invoice_qty": days,
@@ -754,14 +774,14 @@ def bid_to_job_line_items(bid: pd.Series, calc: dict,
              "start_date": None, "end_date": None, "notes": "Day Rate"},
             {"line_number": 3, "description": "Demob",
              "uom": "Ea", "invoice_qty": 1,
-             "unit_price": calc["demob_total"],
-             "line_total": calc["demob_total"],
+             "unit_price": demob,
+             "line_total": demob,
              "start_date": None, "end_date": None, "notes": "Demob"},
         ]
 
     elif btype == "per_bbl":
         total_bbls = float(bid.get("total_bbls") or 0)
-        per_bbl    = calc.get("cost_per_bbl") or 0
+        per_bbl    = float(bid.get("per_bbl_override") or calc.get("cost_per_bbl") or 0)
         lines = [
             {"line_number": 1, "description": "Water Transfer — Per BBL",
              "uom": "BBL", "invoice_qty": total_bbls,
