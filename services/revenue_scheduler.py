@@ -29,6 +29,7 @@ def migrate_revenue_columns(engine):
         ("ordered_by",       "TEXT"),
         ("department",       "TEXT"),
         ("job_description",  "TEXT"),
+        ("billing_type",     "TEXT NOT NULL DEFAULT 'line_item'"),
     ]
     for col, col_type in billing_cols:
         try:
@@ -65,7 +66,7 @@ def update_job_billing(engine, job_id: int, data: dict):
         SET company_man     = :company_man,
             invoice_number  = :invoice_number,
             so_ticket_number= :so_ticket_number,
-            day_rate        = :day_rate,
+            billing_type    = :billing_type,
             accrue          = :accrue,
             ees_supervisor  = :ees_supervisor,
             customer_po     = :customer_po,
