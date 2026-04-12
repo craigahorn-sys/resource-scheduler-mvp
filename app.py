@@ -2942,6 +2942,9 @@ def render_bidding_tab(engine):
                 "labor_supervisor": int(labor_supervisor),
                 "trucks":           int(trucks),
                 "day_rate_override":None,
+                "setup_override":    None,
+                "demob_override":    None,
+                "per_bbl_override":  None,
                 "notes":            None,
             }
             new_id = save_bid(engine, bid_data)
@@ -3050,43 +3053,83 @@ def render_bidding_tab(engine):
         else:
             calc = calc_bid(bid_obj, bid_items_calc)
 
-            # Day rate override for day_rate billing type
-            dr_override = None
-            if billing_type == "day_rate":
-                st.markdown("**Day Rate Billing — set your day rate:**")
-                dr_default = float(bid_obj.get("day_rate_override") or calc["day_total"])
-                dr_col1, dr_col2 = st.columns([2, 3])
-                dr_override = dr_col1.number_input(
-                    "Day Rate ($/day)", min_value=0.0, step=50.0,
-                    value=dr_default, format="%.2f", key="bb_day_rate_override",
-                )
-                dr_col2.caption(
-                    f"Calculated from bid: {MONEY.format(calc['day_total'])}/day  "
-                    f"| Adjustment: {MONEY.format(dr_override - calc['day_total'])}/day"
-                )
-                if st.button("Save Day Rate Override", key="bb_save_dr"):
-                    from services.db import execute as db_execute
-                    db_execute(engine,
-                        "UPDATE bids SET day_rate_override=:dr WHERE id=:id",
-                        {"dr": dr_override, "id": active_bid_id})
-                    st.success("Day rate saved.")
+            # ── Price overrides — shown always, applied to all billing types ──
+            st.markdown("**Price Overrides** — leave at 0 to use calculated value")
+            ov1, ov2, ov3, ov4 = st.columns(4)
 
-            # Summary metrics
-            eff_day_rate = dr_override if dr_override else calc["day_total"]
-            eff_job_cost = (calc["setup_total"]
-                            + eff_day_rate * calc["bid_days"]
-                            + calc["demob_total"])
-            eff_per_bbl  = (eff_job_cost / calc["total_bbls"]
-                            if calc["total_bbls"] > 0 else None)
+            ov_setup = ov1.number_input(
+                "Setup Override ($)",
+                min_value=0.0, step=25.0, format="%.2f",
+                value=float(bid_obj.get("setup_override") or 0),
+                key="bb_ov_setup",
+                help=f"Calculated: {MONEY.format(calc['setup_total'])}",
+            )
+            ov_day = ov2.number_input(
+                "Day Rate Override ($/day)",
+                min_value=0.0, step=25.0, format="%.2f",
+                value=float(bid_obj.get("day_rate_override") or 0),
+                key="bb_ov_day",
+                help=f"Calculated: {MONEY.format(calc['day_total'])}/day",
+            )
+            ov_demob = ov3.number_input(
+                "Demob Override ($)",
+                min_value=0.0, step=25.0, format="%.2f",
+                value=float(bid_obj.get("demob_override") or 0),
+                key="bb_ov_demob",
+                help=f"Calculated: {MONEY.format(calc['demob_total'])}",
+            )
+            ov_per_bbl = ov4.number_input(
+                "Per BBL Override ($/BBL)",
+                min_value=0.0, step=0.001, format="%.5f",
+                value=float(bid_obj.get("per_bbl_override") or 0),
+                key="bb_ov_per_bbl",
+                help="Calculated after other overrides are applied",
+            )
 
+            if st.button("💾 Save Price Overrides", key="bb_save_overrides"):
+                execute(engine, """
+                    UPDATE bids SET
+                        setup_override   = :s,
+                        day_rate_override= :d,
+                        demob_override   = :m,
+                        per_bbl_override = :p
+                    WHERE id = :id
+                """, {
+                    "s": ov_setup   or None,
+                    "d": ov_day     or None,
+                    "m": ov_demob   or None,
+                    "p": ov_per_bbl or None,
+                    "id": active_bid_id,
+                })
+                st.success("Overrides saved.")
+                st.rerun()
+
+            # ── Effective values (override wins over calculated) ───────────
+            eff_setup    = ov_setup   if ov_setup   > 0 else calc["setup_total"]
+            eff_day_rate = ov_day     if ov_day     > 0 else calc["day_total"]
+            eff_demob    = ov_demob   if ov_demob   > 0 else calc["demob_total"]
+            eff_job_cost = eff_setup + eff_day_rate * calc["bid_days"] + eff_demob
+            calc_per_bbl = eff_job_cost / calc["total_bbls"] if calc["total_bbls"] > 0 else None
+            eff_per_bbl  = ov_per_bbl if ov_per_bbl > 0 else calc_per_bbl
+
+            # ── Summary metrics ───────────────────────────────────────────
+            st.markdown("**Bid Totals**")
             m1, m2, m3, m4, m5 = st.columns(5)
-            m1.metric("Setup",         MONEY.format(calc["setup_total"]))
-            m2.metric("Day Rate/Day",  MONEY.format(eff_day_rate))
-            m3.metric("Demob",         MONEY.format(calc["demob_total"]))
-            m4.metric(f"Total Job Cost ({calc['bid_days']} days)",
-                      MONEY.format(eff_job_cost))
+            m1.metric("Setup",
+                      MONEY.format(eff_setup),
+                      delta=MONEY.format(eff_setup - calc["setup_total"]) if ov_setup > 0 else None)
+            m2.metric("Day Rate/Day",
+                      MONEY.format(eff_day_rate),
+                      delta=MONEY.format(eff_day_rate - calc["day_total"]) if ov_day > 0 else None)
+            m3.metric("Demob",
+                      MONEY.format(eff_demob),
+                      delta=MONEY.format(eff_demob - calc["demob_total"]) if ov_demob > 0 else None)
+            m4.metric(f"Total ({calc['bid_days']}d)", MONEY.format(eff_job_cost))
             if eff_per_bbl:
-                m5.metric("Cost / BBL", f"${eff_per_bbl:.5f}")
+                m5.metric("Cost / BBL",
+                          f"${eff_per_bbl:.5f}",
+                          delta=f"${(eff_per_bbl - calc_per_bbl):.5f}"
+                          if ov_per_bbl > 0 and calc_per_bbl else None)
 
             # ── Line Item Toggle ──────────────────────────────────────────
             show_lines = st.toggle("🔍 Show Line Item Detail", key="bb_show_lines")
