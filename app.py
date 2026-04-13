@@ -2665,6 +2665,35 @@ with tab_revenue:
 
         st.divider()
 
+        # ── Linked Bid ────────────────────────────────────────────────────────
+        st.markdown("##### Linked Bid")
+        linked_bid = query_df(engine,
+            "SELECT id, bid_name, status, billing_type FROM bids WHERE job_id = :jid",
+            {"jid": int(selected_rev_job_id)})
+
+        if linked_bid.empty:
+            st.caption("No bid linked to this job.")
+            if st.button("➕ Create Bid for This Job", key=f"rev_create_bid_{selected_rev_job_id}"):
+                st.session_state["bb_active_bid_id"] = None
+                st.session_state["bb_mode"] = "New Bid"
+                st.session_state["rev_jump_to_job_id"] = int(selected_rev_job_id)
+                st.info("Switch to the **Bidding → Bid Builder** tab to complete the bid.")
+        else:
+            bid_row = linked_bid.iloc[0]
+            bc1, bc2 = st.columns([4, 1])
+            bc1.write(
+                f"**{bid_row['bid_name']}** — "
+                f"{bid_row['status']} | "
+                f"{bid_row['billing_type'].replace('_', ' ').title()}"
+            )
+            if bc2.button("✏️ Edit Bid", key=f"rev_edit_bid_{selected_rev_job_id}"):
+                st.session_state["bb_active_bid_id"] = int(bid_row["id"])
+                st.session_state["bb_mode"] = "Edit Existing"
+                st.session_state["bb_existing_bid"] = int(bid_row["id"])
+                st.info("Switch to the **Bidding → Bid Builder** tab.")
+
+        st.divider()
+
         # ── Field Ticket download ─────────────────────────────────────────────
         st.markdown("##### Field Ticket")
         ticket_li = get_line_items_df(engine, job_id=int(selected_rev_job_id))
@@ -2896,24 +2925,96 @@ def render_bidding_tab(engine):
 
         # ── Bid header form ───────────────────────────────────────────────
         st.markdown("##### Bid Details")
-        hf1, hf2, hf3 = st.columns(3)
-        bid_name = hf1.text_input(
-            "Bid Name / Job Description",
-            value=str(existing["bid_name"] if existing is not None else ""),
-            key="bb_bid_name",
+
+        # Row 1: Customer (free text) + Rate Card (selectbox)
+        rc1, rc2 = st.columns(2)
+
+        bid_customer = rc1.text_input(
+            "Customer",
+            value=str(existing["customer"] if existing is not None else ""),
+            key="bb_customer",
+            placeholder="Type the actual customer name…",
+            help="Customer name used across Jobs, Revenue, and Tickets. "                 "Does not need to match a rate card.",
         )
-        cust_options = customers if customers else ["Standard"]
-        cust_default = str(existing["customer"]) if existing is not None else "Standard"
-        cust_idx = cust_options.index(cust_default) if cust_default in cust_options else 0
-        bid_customer = hf2.selectbox("Customer", cust_options,
-                                     index=cust_idx, key="bb_customer")
-        bid_status = hf3.selectbox(
+
+        rc_names = get_customers_with_rate_cards(engine)
+        existing_rc = (str(existing["rate_card"])
+                       if existing is not None
+                       and "rate_card" in existing.index
+                       and existing["rate_card"] else "")
+        if not existing_rc and bid_customer.strip() in rc_names:
+            existing_rc = bid_customer.strip()
+        rc_idx = rc_names.index(existing_rc) if existing_rc in rc_names else 0
+
+        bid_rate_card = rc2.selectbox(
+            "Rate Card",
+            rc_names if rc_names else ["Standard"],
+            index=rc_idx,
+            key="bb_rate_card",
+            help="Which customer pricing to apply. Use Standard for customers "                 "without a custom rate card.",
+        )
+
+        customer_has_rc = bid_customer.strip() in rc_names
+        if bid_customer.strip() and not customer_has_rc:
+            rc1.caption(
+                f"ℹ️ No rate card for **{bid_customer.strip()}** — "                f"using **{bid_rate_card}** pricing."
+            )
+        elif customer_has_rc and bid_rate_card != bid_customer.strip():
+            rc2.caption(
+                f"ℹ️ {bid_customer.strip()} has a rate card — "                f"currently using **{bid_rate_card}** instead."
+            )
+
+        # Row 2: Job Name (linked to jobs) + Status
+        jn1, jn2 = st.columns([3, 1])
+
+        all_jobs_df = query_df(engine,
+            "SELECT id, job_code, job_name, customer FROM jobs ORDER BY job_code")
+        job_name_options = ["(New — not linked to a job)"] + (
+            [f"{r['job_code']} — {r['job_name']} ({r['customer'] or ''})".strip(" ()")
+             for _, r in all_jobs_df.iterrows()]
+            if not all_jobs_df.empty else []
+        )
+
+        existing_job_id = int(existing["job_id"]) if (
+            existing is not None and
+            "job_id" in existing.index and
+            existing["job_id"] is not None and
+            not pd.isna(existing["job_id"])
+        ) else None
+
+        job_sel_idx = 0
+        if existing_job_id and not all_jobs_df.empty:
+            job_match = all_jobs_df[all_jobs_df["id"] == existing_job_id]
+            if not job_match.empty:
+                r = job_match.iloc[0]
+                label = f"{r['job_code']} — {r['job_name']} ({r['customer'] or ''})".strip(" ()")
+                if label in job_name_options:
+                    job_sel_idx = job_name_options.index(label)
+
+        selected_job_label = jn1.selectbox(
+            "Job Name",
+            job_name_options,
+            index=job_sel_idx,
+            key="bb_job_name",
+            help="Link to an existing job, or leave as New for a bid not yet in the scheduler.",
+        )
+
+        linked_job_id = None
+        if selected_job_label != "(New — not linked to a job)" and not all_jobs_df.empty:
+            for _, r in all_jobs_df.iterrows():
+                label = f"{r['job_code']} — {r['job_name']} ({r['customer'] or ''})".strip(" ()")
+                if label == selected_job_label:
+                    linked_job_id = int(r["id"])
+                    break
+
+        bid_status = jn2.selectbox(
             "Status", STATUS_OPTIONS,
             index=STATUS_OPTIONS.index(str(existing["status"]))
                   if existing is not None else 0,
             key="bb_status",
         )
 
+        # Row 3: Billing Type + Bid Days + Total BBLs
         hf4, hf5, hf6 = st.columns(3)
         billing_type = hf4.selectbox(
             "Billing Type",
@@ -2967,10 +3068,17 @@ def render_bidding_tab(engine):
 
         # ── Save bid header ───────────────────────────────────────────────
         if st.button("💾 Save Bid Header", key="bb_save_header"):
+            if linked_job_id and not all_jobs_df.empty:
+                job_row = all_jobs_df[all_jobs_df["id"] == linked_job_id].iloc[0]
+                derived_name = str(job_row["job_name"])
+            else:
+                derived_name = (f"{bid_customer.strip()} Bid"
+                                if bid_customer.strip() else "New Bid")
             bid_data = {
                 "id":               sel_bid_id,
-                "bid_name":         bid_name,
+                "bid_name":         derived_name,
                 "customer":         bid_customer,
+                "rate_card":        bid_rate_card,
                 "region_code":      None,
                 "billing_type":     billing_type,
                 "status":           bid_status,
@@ -2985,6 +3093,7 @@ def render_bidding_tab(engine):
                 "setup_override":    None,
                 "demob_override":    None,
                 "per_bbl_override":  None,
+                "job_id":           linked_job_id,
                 "notes":            None,
             }
             new_id = save_bid(engine, bid_data)
