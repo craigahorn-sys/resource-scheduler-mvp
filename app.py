@@ -2739,13 +2739,18 @@ def render_bidding_tab(engine):
         rc_customers = get_customers_with_rate_cards(engine)
         CREATE_OPT = "➕  Create new rate card…"
 
-        # Single selectbox — existing customers + a create option at the top
+        # Single selectbox — blank on load, create option first, then existing customers
         options = [CREATE_OPT] + (rc_customers if rc_customers else [])
         selection = st.selectbox(
             "View / Edit Customer",
             options,
+            index=None,
+            placeholder="Select a customer…",
             key="rc_customer_select",
         )
+
+        if selection is None:
+            return
 
         if selection == CREATE_OPT:
             # Show create form inline
