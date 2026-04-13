@@ -145,8 +145,8 @@ def get_revenue_jobs_df(engine, region_code: str, month: int, year: int) -> pd.D
             j.location, j.region_code, j.status,
             j.job_start_date, j.job_duration_days,
             j.mob_days_before_job, j.demob_days_after_job,
-            j.company_man, j.invoice_number, j.so_ticket_number,
-            j.day_rate, j.accrue, j.notes
+            j.ordered_by, j.invoice_number, j.so_ticket_number,
+            j.billing_type, j.day_rate, j.accrue, j.notes
         FROM jobs j
         WHERE j.region_code = :region_code
           AND j.status NOT IN ('Cancelled', 'Bid')
