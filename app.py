@@ -2737,41 +2737,44 @@ def render_bidding_tab(engine):
         st.caption("Blank = not applicable / not yet priced. Changes save immediately.")
 
         rc_customers = get_customers_with_rate_cards(engine)
+        CREATE_OPT = "➕  Create new rate card…"
 
-        # Row 1: selector + new customer create
-        rc1, rc2, rc3 = st.columns([3, 2, 1])
-        selected_cust = rc1.selectbox(
-            "Customer",
-            rc_customers,
+        # Single selectbox — existing customers + a create option at the top
+        options = [CREATE_OPT] + (rc_customers if rc_customers else [])
+        selection = st.selectbox(
+            "View / Edit Customer",
+            options,
             key="rc_customer_select",
-        ) if rc_customers else None
+        )
 
-        new_cust_name = rc2.text_input("", key="rc_new_customer",
-                                       placeholder="New customer name…",
-                                       label_visibility="collapsed")
-        if rc3.button("➕ Create", key="rc_create"):
-            if new_cust_name.strip():
-                add_customer_rate_card(engine, new_cust_name.strip())
-                st.success(
-                    f"Rate card created for **{new_cust_name.strip()}** — "                    f"seeded from Standard pricing.")
-                st.rerun()
-            else:
-                st.warning("Enter a customer name first.")
-
-        if not selected_cust:
-            st.info("Select a customer above to view their rate card, or create a new one.")
+        if selection == CREATE_OPT:
+            # Show create form inline
+            st.markdown("**New customer rate card**")
+            nc1, nc2 = st.columns([3, 1])
+            new_cust_name = nc1.text_input("Customer name", key="rc_new_customer",
+                                            placeholder="e.g. Devon Energy")
+            if nc2.button("Create", key="rc_create", use_container_width=True):
+                if new_cust_name.strip():
+                    add_customer_rate_card(engine, new_cust_name.strip())
+                    st.success(
+                        f"✅ Rate card created for **{new_cust_name.strip()}** — "                        f"seeded from Standard pricing.")
+                    st.rerun()
+                else:
+                    st.warning("Enter a customer name first.")
             return
 
-        # Row 2: delete with confirmation — protected to prevent accidental wipes
-        with st.expander(f"⚠️ Delete '{selected_cust}' rate card", expanded=False):
+        selected_cust = selection
+
+        # Delete option — in a collapsed expander to prevent accidents
+        with st.expander(f"⚠️  Delete '{selected_cust}' rate card", expanded=False):
             st.warning(
-                f"This will permanently delete all rates for **{selected_cust}**. "                f"This cannot be undone.")
+                f"This permanently deletes all rates for **{selected_cust}**. "                f"Cannot be undone.")
             confirm_name = st.text_input(
-                f"Type **{selected_cust}** to confirm",
+                f"Type the customer name to confirm",
                 key=f"rc_delete_confirm_{selected_cust}",
-                placeholder=f"Type {selected_cust} here…",
+                placeholder=selected_cust,
             )
-            if st.button("🗑️ Delete Rate Card", key=f"rc_delete_{selected_cust}",
+            if st.button("🗑️ Delete permanently", key=f"rc_delete_{selected_cust}",
                          type="primary"):
                 if confirm_name.strip() == selected_cust:
                     execute(engine,
