@@ -461,18 +461,26 @@ def upsert_rate_card_row(engine, customer: str, item_id: int,
           "m": demob_rate or None, "notes": notes})
 
 
-def add_customer_rate_card(engine, customer: str):
-    """Create empty rate card rows for a new customer from catalog."""
-    catalog = get_catalog(engine)
+def add_customer_rate_card(engine, customer: str, base: str = "Standard"):
+    """Create rate card rows for a new customer, seeded from an existing rate card.
+    Defaults to Standard so new customers start with sensible pricing."""
+    from sqlalchemy import text
+    # Get the base rate card to copy from
+    base_rc = get_rate_card(engine, base)
     with engine.begin() as conn:
-        from sqlalchemy import text
-        for _, row in catalog.iterrows():
+        for _, row in base_rc.iterrows():
             conn.execute(text("""
                 INSERT INTO customer_rate_cards
                     (customer_name, item_id, setup_rate, day_rate, demob_rate)
-                VALUES (:cust, :item_id, NULL, NULL, NULL)
-                ON CONFLICT DO NOTHING
-            """), {"cust": customer, "item_id": int(row["id"])})
+                VALUES (:cust, :item_id, :s, :d, :m)
+                ON CONFLICT (customer_name, item_id) DO NOTHING
+            """), {
+                "cust":    customer,
+                "item_id": int(row["item_id"]),
+                "s":       row["setup_rate"]  if row["setup_rate"]  is not None else None,
+                "d":       row["day_rate"]    if row["day_rate"]    is not None else None,
+                "m":       row["demob_rate"]  if row["demob_rate"]  is not None else None,
+            })
 
 
 def get_bids(engine, status=None) -> pd.DataFrame:
