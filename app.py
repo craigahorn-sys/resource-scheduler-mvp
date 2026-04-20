@@ -764,21 +764,7 @@ def render_requirements_manage_table(df: pd.DataFrame, key_prefix: str = 'req', 
                     requirement_id=int(row["id"]),
                 )
                 st.rerun()
-            if b.button("➕ New Version", key=f"{key_prefix}_newver_{row['id']}"):
-                add_requirement_version(
-                    engine,
-                    job_id=int(row["job_id"]),
-                    resource_class_id=edit_rc_id,
-                    quantity_required=float(edit_qty),
-                    effective_date=edit_eff_pop,
-                    days_before_job_start=int(edit_before),
-                    days_after_job_end=int(edit_after),
-                    priority=edit_priority,
-                    notes=edit_notes,
-                )
-                st.success(f"Version added effective {edit_eff_pop}.")
-                st.rerun()
-            if c.button("🗑 Delete", key=f"{key_prefix}_delete_{row['id']}"):
+            if b.button("Delete", key=f"{key_prefix}_delete_{row['id']}"):
                 delete_requirement(engine, int(row["id"]))
                 st.rerun()
 
