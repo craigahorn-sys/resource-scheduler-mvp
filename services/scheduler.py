@@ -80,19 +80,52 @@ def get_jobs_df(engine):
     return df
 
 
-def _requirement_base_df(engine):
+def migrate_effective_dates(engine):
+    """Add effective_date column to job_requirements if missing."""
+    from sqlalchemy import text as _text
+    try:
+        with engine.begin() as conn:
+            conn.execute(_text(
+                "ALTER TABLE job_requirements ADD COLUMN IF NOT EXISTS "
+                "effective_date DATE NOT NULL DEFAULT CURRENT_DATE"
+            ))
+    except Exception:
+        pass
+
+
+def _requirement_base_df(engine, as_of_date=None):
+    """
+    Returns requirements. If as_of_date is given, for each job+resource_class
+    combination returns only the version whose effective_date is the highest
+    on or before as_of_date. If as_of_date is None, returns ALL versions
+    (for history display).
+    """
     df = query_df(engine, """
         SELECT
-            jr.id, jr.job_id, jr.resource_class_id, jr.quantity_required, jr.days_before_job_start,
-            jr.days_after_job_end, jr.priority, jr.notes,
-            j.job_code, j.job_name, j.region_code, j.status, j.job_start_date, j.job_duration_days,
-            j.mob_days_before_job, j.demob_days_after_job,
+            jr.id, jr.job_id, jr.resource_class_id, jr.quantity_required,
+            jr.days_before_job_start, jr.days_after_job_end, jr.priority,
+            jr.notes, jr.effective_date,
+            j.job_code, j.job_name, j.region_code, j.status, j.job_start_date,
+            j.job_duration_days, j.mob_days_before_job, j.demob_days_after_job,
             rc.class_name, rc.category, rc.unit_type
         FROM job_requirements jr
         JOIN jobs j ON jr.job_id = j.id
         JOIN resource_classes rc ON jr.resource_class_id = rc.id
-        ORDER BY jr.id
+        ORDER BY jr.job_id, jr.resource_class_id, jr.effective_date DESC, jr.id DESC
     """)
+    if df.empty:
+        return df
+
+    # If as_of_date provided, keep only the latest version <= that date
+    if as_of_date is not None:
+        import datetime
+        if not isinstance(as_of_date, datetime.date):
+            as_of_date = pd.to_datetime(as_of_date).date()
+        df["effective_date"] = pd.to_datetime(df["effective_date"]).dt.date
+        # Filter to versions on or before as_of_date
+        df = df[df["effective_date"] <= as_of_date]
+        # Keep only the most recent version per job+resource_class
+        df = df.drop_duplicates(subset=["job_id", "resource_class_id"], keep="first")
     if df.empty:
         return df
     req_start, req_end, ranks = [], [], []
@@ -307,23 +340,74 @@ def delete_pool_adjustment(engine, adjustment_id: int):
 
 
 def create_requirement(engine, data: dict):
+    import datetime
+    eff_date = data.get("effective_date") or datetime.date.today()
     with engine.begin() as conn:
         res = conn.execute(text("""
-            INSERT INTO job_requirements(job_id, resource_class_id, quantity_required, days_before_job_start, days_after_job_end, priority, notes)
-            VALUES (:job_id, :resource_class_id, :quantity_required, :days_before_job_start, :days_after_job_end, :priority, :notes)
+            INSERT INTO job_requirements(
+                job_id, resource_class_id, quantity_required,
+                days_before_job_start, days_after_job_end,
+                priority, notes, effective_date)
+            VALUES (
+                :job_id, :resource_class_id, :quantity_required,
+                :days_before_job_start, :days_after_job_end,
+                :priority, :notes, :effective_date)
             RETURNING id
-        """), data)
+        """), {**data, "effective_date": eff_date})
         requirement_id = int(res.scalar_one())
     recalc_all_requirements(engine)
     return requirement_id
 
 
+def add_requirement_version(engine, job_id: int, resource_class_id: int,
+                             quantity_required: float, effective_date,
+                             days_before_job_start: int = 0,
+                             days_after_job_end: int = 0,
+                             priority: str = "Normal", notes: str = ""):
+    """
+    Insert a new versioned requirement row. Does NOT overwrite existing versions.
+    The planning board uses effective_date to pick the right version per date.
+    """
+    import datetime
+    if not isinstance(effective_date, datetime.date):
+        effective_date = pd.to_datetime(effective_date).date()
+    with engine.begin() as conn:
+        res = conn.execute(text("""
+            INSERT INTO job_requirements(
+                job_id, resource_class_id, quantity_required,
+                days_before_job_start, days_after_job_end,
+                priority, notes, effective_date)
+            VALUES (
+                :job_id, :resource_class_id, :quantity_required,
+                :days_before, :days_after, :priority, :notes, :eff_date)
+            RETURNING id
+        """), {
+            "job_id": job_id,
+            "resource_class_id": resource_class_id,
+            "quantity_required": quantity_required,
+            "days_before": days_before_job_start,
+            "days_after": days_after_job_end,
+            "priority": priority,
+            "notes": notes,
+            "eff_date": effective_date,
+        })
+        new_id = int(res.scalar_one())
+    recalc_all_requirements(engine)
+    return new_id
+
+
 def update_requirement(engine, requirement_id: int, data: dict):
+    """Update in-place (same effective date). Use add_requirement_version for date changes."""
+    import datetime
+    eff_date = data.get("effective_date") or datetime.date.today()
     execute(engine, """
         UPDATE job_requirements
-        SET resource_class_id=:resource_class_id, quantity_required=:quantity_required,
-            days_before_job_start=:days_before_job_start, days_after_job_end=:days_after_job_end,
-            priority=:priority, notes=:notes
+        SET resource_class_id=:resource_class_id,
+            quantity_required=:quantity_required,
+            days_before_job_start=:days_before_job_start,
+            days_after_job_end=:days_after_job_end,
+            priority=:priority, notes=:notes,
+            effective_date=:effective_date
         WHERE id=:requirement_id
     """, {
         "requirement_id": int(requirement_id),
@@ -333,6 +417,7 @@ def update_requirement(engine, requirement_id: int, data: dict):
         "days_after_job_end": int(data["days_after_job_end"]),
         "priority": data["priority"],
         "notes": data.get("notes", ""),
+        "effective_date": eff_date,
     })
     recalc_all_requirements(engine)
 
