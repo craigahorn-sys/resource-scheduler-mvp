@@ -80,90 +80,21 @@ def get_jobs_df(engine):
     return df
 
 
-def migrate_effective_dates(engine):
-    """Add effective_date column to job_requirements if missing. Safe to call repeatedly."""
-    try:
-        with engine.begin() as conn:
-            conn.execute(text(
-                "ALTER TABLE job_requirements ADD COLUMN IF NOT EXISTS "
-                "effective_date DATE NOT NULL DEFAULT CURRENT_DATE"
-            ))
-    except Exception:
-        pass
-
-
-def add_requirement_version(engine, job_id: int, resource_class_id: int,
-                             quantity_required: float, effective_date,
-                             days_before_job_start: int = 0,
-                             days_after_job_end: int = 0,
-                             priority: str = "Normal", notes: str = ""):
-    """Insert a new versioned requirement row without touching existing versions."""
-    import datetime as _dt
-    if not isinstance(effective_date, _dt.date):
-        effective_date = pd.to_datetime(effective_date).date()
-    with engine.begin() as conn:
-        res = conn.execute(text("""
-            INSERT INTO job_requirements(
-                job_id, resource_class_id, quantity_required,
-                days_before_job_start, days_after_job_end,
-                priority, notes, effective_date)
-            VALUES (
-                :job_id, :resource_class_id, :qty,
-                :days_before, :days_after,
-                :priority, :notes, :eff_date)
-            RETURNING id
-        """), {
-            "job_id": job_id, "resource_class_id": resource_class_id,
-            "qty": quantity_required, "days_before": days_before_job_start,
-            "days_after": days_after_job_end, "priority": priority,
-            "notes": notes, "eff_date": effective_date,
-        })
-        new_id = int(res.scalar_one())
-    recalc_all_requirements(engine)
-    return new_id
-
-
-def _requirement_base_df(engine, as_of_date=None):
-    """
-    Returns requirements. If as_of_date given, returns the effective version
-    per job+resource_class as of that date. If None, returns latest version
-    per job+resource_class (current state for planning).
-    Ensures effective_date column exists before querying.
-    """
-    # Ensure column exists — safe no-op if already there
-    migrate_effective_dates(engine)
-
-    import datetime as _dt
+def _requirement_base_df(engine):
     df = query_df(engine, """
         SELECT
-            jr.id, jr.job_id, jr.resource_class_id, jr.quantity_required,
-            jr.days_before_job_start, jr.days_after_job_end, jr.priority,
-            jr.notes, jr.effective_date,
-            j.job_code, j.job_name, j.region_code, j.status, j.job_start_date,
-            j.job_duration_days, j.mob_days_before_job, j.demob_days_after_job,
+            jr.id, jr.job_id, jr.resource_class_id, jr.quantity_required, jr.days_before_job_start,
+            jr.days_after_job_end, jr.priority, jr.notes,
+            j.job_code, j.job_name, j.region_code, j.status, j.job_start_date, j.job_duration_days,
+            j.mob_days_before_job, j.demob_days_after_job,
             rc.class_name, rc.category, rc.unit_type
         FROM job_requirements jr
         JOIN jobs j ON jr.job_id = j.id
         JOIN resource_classes rc ON jr.resource_class_id = rc.id
-        ORDER BY jr.job_id, jr.resource_class_id, jr.effective_date DESC, jr.id DESC
+        ORDER BY jr.id
     """)
     if df.empty:
         return df
-
-    df["effective_date"] = pd.to_datetime(df["effective_date"]).dt.date
-
-    # Filter to the applicable version per job+resource_class
-    if as_of_date is not None:
-        if not isinstance(as_of_date, _dt.date):
-            as_of_date = pd.to_datetime(as_of_date).date()
-        df = df[df["effective_date"] <= as_of_date]
-
-    # Keep only the most recent version per job+resource_class
-    df = df.drop_duplicates(subset=["job_id", "resource_class_id"], keep="first")
-
-    if df.empty:
-        return df
-
     req_start, req_end, ranks = [], [], []
     for _, r in df.iterrows():
         dates = calc_job_dates(r["job_start_date"], int(r["job_duration_days"]), int(r["mob_days_before_job"]), int(r["demob_days_after_job"]))
@@ -376,36 +307,23 @@ def delete_pool_adjustment(engine, adjustment_id: int):
 
 
 def create_requirement(engine, data: dict):
-    import datetime as _dt
-    eff_date = data.get("effective_date") or _dt.date.today()
     with engine.begin() as conn:
         res = conn.execute(text("""
-            INSERT INTO job_requirements(
-                job_id, resource_class_id, quantity_required,
-                days_before_job_start, days_after_job_end,
-                priority, notes, effective_date)
-            VALUES (
-                :job_id, :resource_class_id, :quantity_required,
-                :days_before_job_start, :days_after_job_end,
-                :priority, :notes, :effective_date)
+            INSERT INTO job_requirements(job_id, resource_class_id, quantity_required, days_before_job_start, days_after_job_end, priority, notes)
+            VALUES (:job_id, :resource_class_id, :quantity_required, :days_before_job_start, :days_after_job_end, :priority, :notes)
             RETURNING id
-        """), {**data, "effective_date": eff_date})
+        """), data)
         requirement_id = int(res.scalar_one())
     recalc_all_requirements(engine)
     return requirement_id
 
 
 def update_requirement(engine, requirement_id: int, data: dict):
-    import datetime as _dt
-    eff_date = data.get("effective_date") or _dt.date.today()
     execute(engine, """
         UPDATE job_requirements
-        SET resource_class_id=:resource_class_id,
-            quantity_required=:quantity_required,
-            days_before_job_start=:days_before_job_start,
-            days_after_job_end=:days_after_job_end,
-            priority=:priority, notes=:notes,
-            effective_date=:effective_date
+        SET resource_class_id=:resource_class_id, quantity_required=:quantity_required,
+            days_before_job_start=:days_before_job_start, days_after_job_end=:days_after_job_end,
+            priority=:priority, notes=:notes
         WHERE id=:requirement_id
     """, {
         "requirement_id": int(requirement_id),
@@ -415,7 +333,6 @@ def update_requirement(engine, requirement_id: int, data: dict):
         "days_after_job_end": int(data["days_after_job_end"]),
         "priority": data["priority"],
         "notes": data.get("notes", ""),
-        "effective_date": eff_date,
     })
     recalc_all_requirements(engine)
 
@@ -810,3 +727,212 @@ def upsert_manual_owned_allocation_for_job_class(engine, job_id: int, resource_c
 
 def get_manual_owned_allocations_df(engine):
     return _manual_owned_allocations_base_df(engine)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# DAILY SNAPSHOT + ACTUALS SYSTEM
+# ─────────────────────────────────────────────────────────────────────────────
+
+def migrate_snapshots(engine):
+    """Create snapshot tables if they don't exist."""
+    with engine.begin() as conn:
+        conn.execute(text("""
+            CREATE TABLE IF NOT EXISTS daily_utilization_snapshots (
+                id                BIGSERIAL PRIMARY KEY,
+                snapshot_date     DATE NOT NULL,
+                region_code       TEXT NOT NULL,
+                resource_class_id BIGINT NOT NULL REFERENCES resource_classes(id),
+                class_name        TEXT NOT NULL,
+                category          TEXT NOT NULL,
+                unit_type         TEXT NOT NULL,
+                pool_total        NUMERIC NOT NULL DEFAULT 0,
+                total_required    NUMERIC NOT NULL DEFAULT 0,
+                allocated_ees     NUMERIC NOT NULL DEFAULT 0,
+                allocated_rental  NUMERIC NOT NULL DEFAULT 0,
+                utilization_pct   NUMERIC,
+                UNIQUE(snapshot_date, region_code, resource_class_id)
+            )
+        """))
+        conn.execute(text("""
+            CREATE TABLE IF NOT EXISTS daily_job_snapshots (
+                id                BIGSERIAL PRIMARY KEY,
+                snapshot_date     DATE NOT NULL,
+                region_code       TEXT NOT NULL,
+                job_id            BIGINT NOT NULL REFERENCES jobs(id) ON DELETE CASCADE,
+                job_code          TEXT NOT NULL,
+                job_name          TEXT NOT NULL,
+                customer          TEXT,
+                resource_class_id BIGINT NOT NULL REFERENCES resource_classes(id),
+                class_name        TEXT NOT NULL,
+                quantity_required NUMERIC NOT NULL DEFAULT 0,
+                allocated_ees     NUMERIC NOT NULL DEFAULT 0,
+                allocated_rental  NUMERIC NOT NULL DEFAULT 0,
+                allocation_status TEXT,
+                UNIQUE(snapshot_date, job_id, resource_class_id)
+            )
+        """))
+
+
+def take_daily_snapshot(engine, snapshot_date=None):
+    """Capture today's state. No-op if snapshot already exists for that date."""
+    import datetime as _dt
+    if snapshot_date is None:
+        snapshot_date = _dt.date.today()
+
+    existing = _scalar(engine,
+        "SELECT COUNT(*) FROM daily_utilization_snapshots WHERE snapshot_date=:d",
+        {"d": snapshot_date})
+    if existing and existing > 0:
+        return False
+
+    pool_df = pool_snapshot_df(engine, snapshot_date)
+    req_df  = requirement_summary_df(engine)
+    if not req_df.empty and "status" in req_df.columns:
+        req_df = req_df[~req_df["status"].astype(str).isin(EXCLUDED_CALC_STATUSES)].copy()
+
+    pool_rows, job_rows = [], []
+
+    for _, p in pool_df.iterrows():
+        region = str(p["region_code"])
+        rc_id  = int(p["resource_class_id"])
+
+        active_req = pd.DataFrame()
+        if not req_df.empty:
+            mask = (
+                (req_df["region_code"] == region) &
+                (req_df["resource_class_id"] == rc_id) &
+                (pd.to_datetime(req_df["required_start"]) <= pd.to_datetime(snapshot_date)) &
+                (pd.to_datetime(req_df["required_end"])   >= pd.to_datetime(snapshot_date))
+            )
+            active_req = req_df[mask].copy()
+
+        total_req    = float(active_req["quantity_required"].sum())        if not active_req.empty else 0.0
+        alloc_ees    = float(active_req["quantity_assigned_manual"].sum()) if not active_req.empty else 0.0
+        alloc_rental = float(active_req["quantity_assigned_rental"].sum()) if not active_req.empty else 0.0
+        pool_total   = float(p["total_pool"])
+        util_pct     = round(total_req / pool_total * 100, 2) if pool_total > 0 else None
+
+        pool_rows.append({
+            "snapshot_date": snapshot_date, "region_code": region,
+            "resource_class_id": rc_id,
+            "class_name": str(p["class_name"]), "category": str(p["category"]),
+            "unit_type": str(p["unit_type"]), "pool_total": pool_total,
+            "total_required": total_req, "allocated_ees": alloc_ees,
+            "allocated_rental": alloc_rental, "utilization_pct": util_pct,
+        })
+
+        for _, jr in active_req.iterrows():
+            job_rows.append({
+                "snapshot_date": snapshot_date, "region_code": region,
+                "job_id": int(jr["job_id"]), "job_code": str(jr["job_code"]),
+                "job_name": str(jr["job_name"]),
+                "customer": str(jr.get("customer", "") or ""),
+                "resource_class_id": rc_id, "class_name": str(p["class_name"]),
+                "quantity_required": float(jr["quantity_required"]),
+                "allocated_ees": float(jr["quantity_assigned_manual"]),
+                "allocated_rental": float(jr["quantity_assigned_rental"]),
+                "allocation_status": str(jr.get("allocation_status", "")),
+            })
+
+    with engine.begin() as conn:
+        for row in pool_rows:
+            conn.execute(text("""
+                INSERT INTO daily_utilization_snapshots
+                    (snapshot_date, region_code, resource_class_id, class_name,
+                     category, unit_type, pool_total, total_required,
+                     allocated_ees, allocated_rental, utilization_pct)
+                VALUES (:snapshot_date, :region_code, :resource_class_id, :class_name,
+                        :category, :unit_type, :pool_total, :total_required,
+                        :allocated_ees, :allocated_rental, :utilization_pct)
+                ON CONFLICT (snapshot_date, region_code, resource_class_id) DO NOTHING
+            """), row)
+        for row in job_rows:
+            conn.execute(text("""
+                INSERT INTO daily_job_snapshots
+                    (snapshot_date, region_code, job_id, job_code, job_name,
+                     customer, resource_class_id, class_name,
+                     quantity_required, allocated_ees, allocated_rental, allocation_status)
+                VALUES (:snapshot_date, :region_code, :job_id, :job_code, :job_name,
+                        :customer, :resource_class_id, :class_name,
+                        :quantity_required, :allocated_ees, :allocated_rental, :allocation_status)
+                ON CONFLICT (snapshot_date, job_id, resource_class_id) DO NOTHING
+            """), row)
+    return True
+
+
+def get_utilization_history(engine, region_code=None, class_name=None,
+                             date_from=None, date_to=None):
+    conditions, params = [], {}
+    if region_code:
+        conditions.append("region_code=:region"); params["region"] = region_code
+    if class_name:
+        conditions.append("class_name=:cn"); params["cn"] = class_name
+    if date_from:
+        conditions.append("snapshot_date>=:df"); params["df"] = date_from
+    if date_to:
+        conditions.append("snapshot_date<=:dt"); params["dt"] = date_to
+    where = ("WHERE " + " AND ".join(conditions)) if conditions else ""
+    return query_df(engine, f"""
+        SELECT snapshot_date, region_code, class_name, category, unit_type,
+               pool_total, total_required, allocated_ees, allocated_rental, utilization_pct
+        FROM daily_utilization_snapshots {where}
+        ORDER BY snapshot_date DESC, region_code, class_name
+    """, params)
+
+
+def get_job_snapshot_history(engine, date_from=None, date_to=None,
+                              region_code=None, class_name=None):
+    conditions, params = [], {}
+    if region_code:
+        conditions.append("region_code=:region"); params["region"] = region_code
+    if class_name:
+        conditions.append("class_name=:cn"); params["cn"] = class_name
+    if date_from:
+        conditions.append("snapshot_date>=:df"); params["df"] = date_from
+    if date_to:
+        conditions.append("snapshot_date<=:dt"); params["dt"] = date_to
+    where = ("WHERE " + " AND ".join(conditions)) if conditions else ""
+    return query_df(engine, f"""
+        SELECT snapshot_date, region_code, job_code, job_name, customer,
+               class_name, quantity_required, allocated_ees, allocated_rental,
+               allocation_status
+        FROM daily_job_snapshots {where}
+        ORDER BY snapshot_date DESC, job_code, class_name
+    """, params)
+
+
+def get_actuals_requirements(engine, region_code=None):
+    """
+    Current requirements with actual date ranges — reflects any job date changes.
+    Used for the Actuals view (always computed fresh, not from snapshots).
+    """
+    req_df = requirement_summary_df(engine)
+    if req_df.empty:
+        return req_df
+    if region_code:
+        req_df = req_df[req_df["region_code"] == region_code]
+    return req_df
+
+
+def get_actuals_billing(engine, region_code=None):
+    """
+    Revenue line items with start/end dates — what was actually billed.
+    Joined with jobs so we know region and customer.
+    """
+    params = {}
+    where = ""
+    if region_code:
+        where = "WHERE j.region_code = :region"
+        params["region"] = region_code
+    return query_df(engine, f"""
+        SELECT
+            li.id, li.job_id, li.line_number, li.description, li.uom,
+            li.start_date, li.end_date, li.invoice_qty, li.unit_price, li.line_total,
+            j.job_code, j.job_name, j.customer, j.region_code,
+            b.id AS bid_id, b.customer AS bid_customer
+        FROM job_line_items li
+        JOIN jobs j ON j.id = li.job_id
+        LEFT JOIN bids b ON b.job_id = j.id
+        {where}
+        ORDER BY j.job_code, li.line_number
+    """, params)
