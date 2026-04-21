@@ -23,6 +23,9 @@ from services.scheduler import (
     create_rental_requirement, delete_rental_requirement, get_rental_requirements_df,
     delete_manual_owned_allocation, get_manual_owned_allocations_df,
     upsert_manual_owned_allocation_for_job_class, upsert_rental_requirement_for_job_class,
+    add_requirement_version, migrate_effective_dates,
+    migrate_snapshots, take_daily_snapshot, get_utilization_history,
+    get_job_snapshot_history, get_actuals_requirements, get_actuals_billing,
 )
 
 st.set_page_config(page_title="Resource Scheduler V2", layout="wide")
@@ -86,6 +89,9 @@ engine = get_engine()
 init_db(engine)
 migrate_revenue_columns(engine)
 migrate_bidding(engine)
+migrate_effective_dates(engine)
+migrate_snapshots(engine)
+take_daily_snapshot(engine)
 
 try:
     query_df(engine, "SELECT customer_color FROM jobs LIMIT 1")
@@ -1538,8 +1544,8 @@ if "last_active_region" not in st.session_state:
 if st.session_state["last_active_region"] != ACTIVE_REGION:
     st.session_state["last_active_region"] = ACTIVE_REGION
 
-tab_jobs, tab_job_requirements, tab_planning, tab_pools, tab_requirements, tab_allocations, tab_revenue, tab_bidding = st.tabs(
-    ["Jobs", "Job Requirements", "Planning Board", "Pools", "Requirements", "Allocations", "Revenue", "Bidding"]
+tab_jobs, tab_job_requirements, tab_planning, tab_pools, tab_requirements, tab_allocations, tab_revenue, tab_bidding, tab_history = st.tabs(
+    ["Jobs", "Job Requirements", "Planning Board", "Pools", "Requirements", "Allocations", "Revenue", "Bidding", "📈 History"]
 )
 
 with tab_jobs:
@@ -2665,6 +2671,41 @@ with tab_revenue:
 
         st.divider()
 
+        # ── Linked Bid ────────────────────────────────────────────────────────
+        st.markdown("##### Linked Bid")
+        linked_bid = query_df(engine,
+            "SELECT id, bid_name, status, billing_type FROM bids WHERE job_id = :jid",
+            {"jid": int(selected_rev_job_id)})
+        if linked_bid.empty:
+            st.caption("No bid linked to this job.")
+            if st.button("➕ Create Bid for This Job",
+                         key=f"rev_create_bid_{selected_rev_job_id}"):
+                st.session_state["bb_active_bid_id"] = None
+                st.session_state["bb_mode"] = "New Bid"
+                st.info("Switch to the **Bidding → Bid Builder** tab.")
+        else:
+            bid_row = linked_bid.iloc[0]
+            bc1, bc2 = st.columns([4, 1])
+            BILLING_DISPLAY = {"line_item": "Line Item",
+                               "day_rate": "Day Rate", "per_bbl": "Per BBL"}
+            bc1.write(
+                f"**{bid_row['bid_name']}** — "                f"{bid_row['status']} | "                f"{BILLING_DISPLAY.get(str(bid_row['billing_type']), bid_row['billing_type'])}"
+            )
+            if bc2.button("✏️ Edit Bid", key=f"rev_edit_bid_{selected_rev_job_id}"):
+                bid_id = int(bid_row["id"])
+                for k in ["bb_customer", "bb_rate_card", "bb_job_name",
+                           "bb_status", "bb_billing_type", "bb_bid_days",
+                           "bb_total_bbls", "bb_hrs_shift", "bb_labor_gen",
+                           "bb_labor_lead", "bb_labor_sup", "bb_trucks"]:
+                    st.session_state.pop(k, None)
+                st.session_state["bb_active_bid_id"] = bid_id
+                st.session_state["bb_last_loaded_bid_id"] = None
+                st.session_state["bb_existing_bid"] = bid_id
+                st.session_state["bb_mode"] = "Edit Existing"
+                st.info("Switch to the **Bidding → Bid Builder** tab.")
+
+        st.divider()
+
         # ── Field Ticket download ─────────────────────────────────────────────
         st.markdown("##### Field Ticket")
         ticket_li = get_line_items_df(engine, job_id=int(selected_rev_job_id))
@@ -2753,7 +2794,6 @@ def render_bidding_tab(engine):
             st.info("Select a customer above to view their rate card, or create a new one.")
 
         elif selection == CREATE_OPT:
-            # Show create form inline
             st.markdown("**New customer rate card**")
             nc1, nc2 = st.columns([3, 1])
             new_cust_name = nc1.text_input("Customer name", key="rc_new_customer",
@@ -2803,30 +2843,39 @@ def render_bidding_tab(engine):
                         c1, c2, c3, c4, c5 = st.columns([3, 1.2, 1.2, 1.2, 1.2])
                         ikey = f"rc_{selected_cust}_{row['item_id']}"
                         c1.write(row["name"])
-                        s_val = float(row["setup_rate"]) if row["setup_rate"] is not None else None
-                        d_val = float(row["day_rate"])   if row["day_rate"]   is not None else None
-                        m_val = float(row["demob_rate"]) if row["demob_rate"] is not None else None
-                        s_inp = c2.number_input("", value=s_val or 0.0, min_value=0.0,
-                            step=0.01, format="%.4f", key=f"{ikey}_s",
-                            disabled=not bool(row["has_setup"]),
-                            label_visibility="collapsed")
-                        d_inp = c3.number_input("", value=d_val or 0.0, min_value=0.0,
-                            step=0.01, format="%.4f", key=f"{ikey}_d",
-                            disabled=not bool(row["has_day_rate"]),
-                            label_visibility="collapsed")
-                        m_inp = c4.number_input("", value=m_val or 0.0, min_value=0.0,
-                            step=0.01, format="%.4f", key=f"{ikey}_m",
-                            disabled=not bool(row["has_demob"]),
-                            label_visibility="collapsed")
-                        if c5.button("💾", key=f"{ikey}_save"):
-                            upsert_rate_card_row(
-                                engine, selected_cust, int(row["item_id"]),
-                                s_inp if row["has_setup"]    else None,
-                                d_inp if row["has_day_rate"] else None,
-                                m_inp if row["has_demob"]    else None,
-                            )
-                            st.success(f"Saved {row['name']}", icon="✓")
-                            st.rerun()
+
+                    # Only show inputs for applicable charge types
+                    s_val = float(row["setup_rate"]) if row["setup_rate"] is not None else None
+                    d_val = float(row["day_rate"])   if row["day_rate"]   is not None else None
+                    m_val = float(row["demob_rate"]) if row["demob_rate"] is not None else None
+
+                    s_inp = c2.number_input("", value=s_val or 0.0,
+                        min_value=0.0, step=0.01, format="%.4f",
+                        key=f"{ikey}_s",
+                        disabled=not bool(row["has_setup"]),
+                        label_visibility="collapsed")
+
+                    d_inp = c3.number_input("", value=d_val or 0.0,
+                        min_value=0.0, step=0.01, format="%.4f",
+                        key=f"{ikey}_d",
+                        disabled=not bool(row["has_day_rate"]),
+                        label_visibility="collapsed")
+
+                    m_inp = c4.number_input("", value=m_val or 0.0,
+                        min_value=0.0, step=0.01, format="%.4f",
+                        key=f"{ikey}_m",
+                        disabled=not bool(row["has_demob"]),
+                        label_visibility="collapsed")
+
+                    if c5.button("💾", key=f"{ikey}_save"):
+                        upsert_rate_card_row(
+                            engine, selected_cust, int(row["item_id"]),
+                            s_inp if row["has_setup"]    else None,
+                            d_inp if row["has_day_rate"] else None,
+                            m_inp if row["has_demob"]    else None,
+                        )
+                        st.success(f"Saved {row['name']}", icon="✓")
+                        st.rerun()
 
     # ═════════════════════════════════════════════════════════════════════════
     # BIDS LIST TAB
@@ -2906,6 +2955,7 @@ def render_bidding_tab(engine):
                 ),
                 key="bb_existing_bid",
             )
+            existing = get_bid(engine, sel_bid_id)
             # Clear widget cache when bid changes so values reload from DB
             last_loaded = st.session_state.get("bb_last_loaded_bid_id")
             if last_loaded != sel_bid_id:
@@ -2916,7 +2966,6 @@ def render_bidding_tab(engine):
                     st.session_state.pop(k, None)
                 st.session_state["bb_last_loaded_bid_id"] = sel_bid_id
                 st.rerun()
-            existing = get_bid(engine, sel_bid_id)
         else:
             sel_bid_id = None
             existing = None
@@ -2927,9 +2976,8 @@ def render_bidding_tab(engine):
         # ── Bid header form ───────────────────────────────────────────────
         st.markdown("##### Bid Details")
 
-        # Customer (free text) + Rate Card (selectbox) — always first
+        # Customer (free text) + Rate Card (selectbox) — separate by design
         rc1, rc2 = st.columns(2)
-
         bid_customer = rc1.text_input(
             "Customer",
             value=str(existing["customer"] if existing is not None else ""),
@@ -2937,7 +2985,6 @@ def render_bidding_tab(engine):
             placeholder="Type the actual customer name…",
             help="Customer name used across Jobs, Revenue, and Tickets. "                 "Does not need to match a rate card.",
         )
-
         rc_names = get_customers_with_rate_cards(engine)
         existing_rc = (str(existing["rate_card"])
                        if existing is not None
@@ -2946,7 +2993,6 @@ def render_bidding_tab(engine):
         if not existing_rc and bid_customer.strip() in rc_names:
             existing_rc = bid_customer.strip()
         rc_idx = rc_names.index(existing_rc) if existing_rc in rc_names else 0
-
         bid_rate_card = rc2.selectbox(
             "Rate Card",
             rc_names if rc_names else ["Standard"],
@@ -2954,12 +3000,11 @@ def render_bidding_tab(engine):
             key="bb_rate_card",
             help="Which pricing to apply. Use Standard for customers without a custom rate card.",
         )
-
         customer_has_rc = bid_customer.strip() in rc_names
         if bid_customer.strip() and not customer_has_rc:
             rc1.caption(f"ℹ️ No rate card for **{bid_customer.strip()}** — "                        f"using **{bid_rate_card}** pricing.")
         elif customer_has_rc and bid_rate_card != bid_customer.strip():
-            rc2.caption(f"ℹ️ Using **{bid_rate_card}** pricing "                        f"(not {bid_customer.strip()})")
+            rc2.caption(f"ℹ️ Using **{bid_rate_card}** pricing.")
 
         # Job Name (linked to jobs) + Status
         jn1, jn2 = st.columns([3, 1])
@@ -2982,10 +3027,8 @@ def render_bidding_tab(engine):
                 lbl = f"{r['job_code']} — {r['job_name']} ({r['customer'] or ''})".strip(" ()")
                 if lbl in job_name_options:
                     job_sel_idx = job_name_options.index(lbl)
-
         selected_job_label = jn1.selectbox(
-            "Job Name", job_name_options, index=job_sel_idx,
-            key="bb_job_name",
+            "Job Name", job_name_options, index=job_sel_idx, key="bb_job_name",
             help="Link to an existing job, or leave as New.",
         )
         linked_job_id = None
@@ -2995,7 +3038,6 @@ def render_bidding_tab(engine):
                 if lbl == selected_job_label:
                     linked_job_id = int(r["id"])
                     break
-
         bid_status = jn2.selectbox(
             "Status", STATUS_OPTIONS,
             index=STATUS_OPTIONS.index(str(existing["status"]))
@@ -3057,11 +3099,9 @@ def render_bidding_tab(engine):
         # ── Save bid header ───────────────────────────────────────────────
         if st.button("💾 Save Bid Header", key="bb_save_header"):
             if linked_job_id and not all_jobs_df.empty:
-                job_row = all_jobs_df[all_jobs_df["id"] == linked_job_id].iloc[0]
-                derived_name = str(job_row["job_name"])
+                derived_name = str(all_jobs_df[all_jobs_df["id"]==linked_job_id].iloc[0]["job_name"])
             else:
-                derived_name = (f"{bid_customer.strip()} Bid"
-                                if bid_customer.strip() else "New Bid")
+                derived_name = f"{bid_customer.strip()} Bid" if bid_customer.strip() else "New Bid"
             bid_data = {
                 "id":               sel_bid_id,
                 "bid_name":         derived_name,
@@ -3348,3 +3388,312 @@ def render_bidding_tab(engine):
 
 with tab_bidding:
     render_bidding_tab(engine)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# UTILIZATION HISTORY TAB
+# ─────────────────────────────────────────────────────────────────────────────
+with tab_history:
+    import datetime as _dt
+
+    st.subheader("Utilization History")
+
+    # Manual snapshot button
+    snap_col, _ = st.columns([1, 3])
+    if snap_col.button("📸 Capture Today's Snapshot", key="manual_snapshot"):
+        if take_daily_snapshot(engine):
+            st.success("Snapshot captured.")
+        else:
+            st.info("Today's snapshot already exists.")
+
+    hist_sub1, hist_sub2, hist_sub3 = st.tabs([
+        "📸 Schedule History", "✅ Actuals", "🔍 Requirements vs Billing"
+    ])
+
+    # ── Shared filters ────────────────────────────────────────────────────────
+    regions_list = query_df(engine, "SELECT region_code FROM regions ORDER BY region_code")
+    region_opts  = ["All"] + regions_list["region_code"].tolist() if not regions_list.empty else ["All"]
+
+    # ═════════════════════════════════════════════════════════════════════════
+    # TAB 1 — SCHEDULE HISTORY (snapshots)
+    # ═════════════════════════════════════════════════════════════════════════
+    with hist_sub1:
+        st.caption(
+            "Shows how the schedule looked on each day the app was open. "
+            "Reflects the plan as it existed on that date, not adjusted actuals."
+        )
+
+        hist_df = get_utilization_history(engine)
+        if hist_df.empty:
+            st.info("No snapshot data yet — snapshots capture automatically each time the app loads.")
+        else:
+            hist_df["snapshot_date"] = pd.to_datetime(hist_df["snapshot_date"]).dt.date
+            date_min = hist_df["snapshot_date"].min()
+            date_max = hist_df["snapshot_date"].max()
+
+            hf1, hf2, hf3, hf4 = st.columns(4)
+            sel_region  = hf1.selectbox("Region", region_opts, key="sh_region")
+            all_classes = ["All"] + sorted(hist_df["class_name"].unique().tolist())
+            sel_class   = hf2.selectbox("Resource Class", all_classes, key="sh_class")
+            date_from   = hf3.date_input("From", value=date_min, min_value=date_min, max_value=date_max, key="sh_from")
+            date_to     = hf4.date_input("To",   value=date_max, min_value=date_min, max_value=date_max, key="sh_to")
+
+            filt = hist_df[(hist_df["snapshot_date"] >= date_from) & (hist_df["snapshot_date"] <= date_to)].copy()
+            if sel_region != "All": filt = filt[filt["region_code"] == sel_region]
+            if sel_class  != "All": filt = filt[filt["class_name"]  == sel_class]
+
+            if filt.empty:
+                st.warning("No data for selected filters.")
+            else:
+                # Utilization % chart
+                chart = filt.dropna(subset=["utilization_pct"]).copy()
+                if not chart.empty:
+                    color_col = "class_name" if sel_class == "All" else "region_code"
+                    if sel_class == "All":
+                        top = chart.groupby("class_name")["utilization_pct"].mean().nlargest(8).index
+                        chart = chart[chart["class_name"].isin(top)]
+                    st.markdown("**Utilization % Over Time**")
+                    fig = px.line(chart, x="snapshot_date", y="utilization_pct",
+                                  color=color_col, markers=True,
+                                  labels={"snapshot_date":"Date","utilization_pct":"Utilization %"})
+                    fig.update_layout(yaxis_ticksuffix="%", height=350,
+                                      margin=dict(l=0,r=0,t=10,b=0))
+                    st.plotly_chart(fig, use_container_width=True)
+
+                # Pool vs Required
+                st.markdown("**Pool Available vs Required**")
+                agg = filt.groupby(["snapshot_date","region_code"]).agg(
+                    pool_total=("pool_total","sum"),
+                    total_required=("total_required","sum"),
+                    allocated_ees=("allocated_ees","sum"),
+                    allocated_rental=("allocated_rental","sum"),
+                ).reset_index()
+                fig2 = px.area(agg, x="snapshot_date",
+                               y=["allocated_ees","allocated_rental","pool_total"],
+                               color_discrete_map={"pool_total":"lightgray",
+                                                   "allocated_ees":"steelblue",
+                                                   "allocated_rental":"orange"},
+                               labels={"snapshot_date":"Date","value":"Quantity",
+                                       "variable":""},
+                               height=320)
+                fig2.update_layout(margin=dict(l=0,r=0,t=10,b=0))
+                st.plotly_chart(fig2, use_container_width=True)
+
+                # Raw table + download
+                with st.expander("View raw data"):
+                    st.dataframe(filt, hide_index=True, use_container_width=True)
+                    st.download_button("⬇️ Download CSV",
+                        filt.to_csv(index=False).encode(),
+                        f"schedule_history_{date_from}_{date_to}.csv",
+                        mime="text/csv", key="sh_download")
+
+    # ═════════════════════════════════════════════════════════════════════════
+    # TAB 2 — ACTUALS (current data, reflects any date adjustments)
+    # ═════════════════════════════════════════════════════════════════════════
+    with hist_sub2:
+        st.caption(
+            "Computed fresh from current job requirements and billing line items. "
+            "Always reflects actual dates — if a job ran longer, this shows it."
+        )
+
+        af1, af2 = st.columns(2)
+        sel_act_region = af1.selectbox("Region", region_opts, key="act_region")
+        act_date = af2.date_input("View as of date", value=_dt.date.today(), key="act_date")
+
+        region_filter = None if sel_act_region == "All" else sel_act_region
+
+        req_df  = get_actuals_requirements(engine, region_filter)
+        bill_df = get_actuals_billing(engine, region_filter)
+
+        if not req_df.empty:
+            req_df["required_start"] = pd.to_datetime(req_df["required_start"]).dt.date
+            req_df["required_end"]   = pd.to_datetime(req_df["required_end"]).dt.date
+
+        # Filter to active on act_date
+        active_req = req_df[
+            (req_df["required_start"] <= act_date) &
+            (req_df["required_end"]   >= act_date)
+        ].copy() if not req_df.empty else pd.DataFrame()
+
+        active_bill = pd.DataFrame()
+        if not bill_df.empty:
+            bill_df["start_date"] = pd.to_datetime(bill_df["start_date"], errors="coerce").dt.date
+            bill_df["end_date"]   = pd.to_datetime(bill_df["end_date"],   errors="coerce").dt.date
+            # Items with dates that cover act_date, OR items with no dates (lump charges)
+            mask_dated = (
+                bill_df["start_date"].notna() &
+                (bill_df["start_date"] <= act_date) &
+                (bill_df["end_date"]   >= act_date)
+            )
+            mask_undated = bill_df["start_date"].isna()
+            active_bill = bill_df[mask_dated | mask_undated].copy()
+
+        st.markdown(f"**Active as of {act_date.strftime('%m/%d/%Y')}**")
+
+        ac1, ac2, ac3 = st.columns(3)
+        ac1.metric("Active Requirements", len(active_req) if not active_req.empty else 0)
+        ac2.metric("Active Billing Lines", len(active_bill) if not active_bill.empty else 0)
+
+        # Requirements breakdown
+        if not active_req.empty:
+            st.markdown("**Requirements (from job requirements)**")
+            req_display = active_req[[
+                "job_code","job_name","customer","class_name",
+                "quantity_required","quantity_assigned_manual","quantity_assigned_rental",
+                "required_start","required_end","allocation_status"
+            ]].copy()
+            req_display.columns = [
+                "Job Code","Job Name","Customer","Resource",
+                "Qty Required","EES Allocated","Rental Allocated",
+                "Start","End","Status"
+            ]
+            st.dataframe(req_display, hide_index=True, use_container_width=True)
+
+        # Billing breakdown
+        if not active_bill.empty:
+            st.markdown("**Billing Lines (from revenue line items)**")
+            bill_display = active_bill[[
+                "job_code","job_name","customer","description",
+                "uom","invoice_qty","unit_price","line_total",
+                "start_date","end_date"
+            ]].copy()
+            bill_display.columns = [
+                "Job Code","Job Name","Customer","Description",
+                "UOM","Qty","Unit Price","Line Total","Start","End"
+            ]
+            st.dataframe(bill_display, hide_index=True, use_container_width=True)
+
+        if active_req.empty and active_bill.empty:
+            st.info(f"No active requirements or billing lines on {act_date}.")
+
+    # ═════════════════════════════════════════════════════════════════════════
+    # TAB 3 — REQUIREMENTS vs BILLING (gap analysis)
+    # ═════════════════════════════════════════════════════════════════════════
+    with hist_sub3:
+        st.caption(
+            "Shows requirements and billing side by side per job. "
+            "Gaps indicate items in requirements that never made it onto a ticket. "
+            "Bid-linked jobs show automatic matching; manual jobs show side-by-side for eyeballing."
+        )
+
+        gf1, gf2 = st.columns(2)
+        sel_gap_region = gf1.selectbox("Region", region_opts, key="gap_region")
+        gap_region = None if sel_gap_region == "All" else sel_gap_region
+
+        all_jobs = query_df(engine,
+            "SELECT id, job_code, job_name, customer FROM jobs ORDER BY job_code")
+        if not all_jobs.empty:
+            job_opts = ["All Jobs"] + [
+                f"{r['job_code']} — {r['job_name']}"
+                for _, r in all_jobs.iterrows()
+            ]
+            sel_job_label = gf2.selectbox("Job", job_opts, key="gap_job")
+            sel_job_id = None
+            if sel_job_label != "All Jobs":
+                sel_job_code = sel_job_label.split(" — ")[0]
+                match = all_jobs[all_jobs["job_code"] == sel_job_code]
+                if not match.empty:
+                    sel_job_id = int(match.iloc[0]["id"])
+
+        req_all  = get_actuals_requirements(engine, gap_region)
+        bill_all = get_actuals_billing(engine, gap_region)
+
+        if sel_job_id:
+            if not req_all.empty:
+                req_all = req_all[req_all["job_id"] == sel_job_id]
+            if not bill_all.empty:
+                bill_all = bill_all[bill_all["job_id"] == sel_job_id]
+
+        # ── Requirements side ─────────────────────────────────────────────────
+        col_req, col_bill = st.columns(2)
+
+        with col_req:
+            st.markdown("#### 📋 Requirements")
+            if req_all.empty:
+                st.info("No requirements.")
+            else:
+                for job_id, job_reqs in req_all.groupby("job_id"):
+                    job_info = job_reqs.iloc[0]
+                    with st.expander(
+                        f"**{job_info['job_code']}** — {job_info['job_name']} "
+                        f"({job_info.get('customer','') or '—'})",
+                        expanded=(sel_job_id is not None)
+                    ):
+                        # Check if bid-linked
+                        bid_check = query_df(engine,
+                            "SELECT id FROM bids WHERE job_id=:jid",
+                            {"jid": int(job_id)})
+                        if not bid_check.empty:
+                            st.caption("🔗 Bid-linked — automatic matching available")
+
+                        for _, req in job_reqs.iterrows():
+                            ees    = float(req.get("quantity_assigned_manual", 0))
+                            rental = float(req.get("quantity_assigned_rental", 0))
+                            total  = ees + rental
+                            qty    = float(req["quantity_required"])
+                            gap    = qty - total
+                            color  = "🔴" if gap > 0 else "🟢"
+                            st.write(
+                                f"{color} **{req['class_name']}** — "
+                                f"Required: {qty} {req['unit_type']} | "
+                                f"EES: {ees} | Rental: {rental}"
+                            )
+                            if gap > 0:
+                                st.caption(f"⚠️ Shortfall: {gap} {req['unit_type']}")
+
+        with col_bill:
+            st.markdown("#### 💰 Billing Lines")
+            if bill_all.empty:
+                st.info("No billing line items.")
+            else:
+                for job_id, job_bills in bill_all.groupby("job_id"):
+                    job_info = job_bills.iloc[0]
+                    is_bid_linked = not query_df(engine,
+                        "SELECT id FROM bids WHERE job_id=:jid",
+                        {"jid": int(job_id)}).empty
+
+                    with st.expander(
+                        f"**{job_info['job_code']}** — {job_info['job_name']} "
+                        f"({job_info.get('customer','') or '—'})",
+                        expanded=(sel_job_id is not None)
+                    ):
+                        if is_bid_linked:
+                            st.caption("🔗 Bid-linked")
+
+                        job_total = 0.0
+                        for _, li in job_bills.iterrows():
+                            lt = float(li["line_total"] or 0) if li["line_total"] is not None else 0.0
+                            job_total += lt
+                            date_str = ""
+                            if li.get("start_date") and li.get("end_date"):
+                                date_str = (f" | {li['start_date']} → {li['end_date']}")
+                            elif li.get("start_date"):
+                                date_str = f" | {li['start_date']}"
+                            st.write(
+                                f"**{li['description']}** — "
+                                f"{li['invoice_qty']} {li['uom']} × "
+                                f"${float(li['unit_price'] or 0):,.2f} = "
+                                f"**${lt:,.2f}**{date_str}"
+                            )
+                        st.markdown(f"**Job Total: ${job_total:,.2f}**")
+
+        # ── Gap summary table (for jobs with both req and billing) ────────────
+        st.divider()
+        st.markdown("#### Gap Summary — Items in Requirements Not Billed")
+        st.caption("For bid-linked jobs this is automatic. For manual jobs, review the side-by-side above.")
+
+        if not req_all.empty:
+            # Jobs with requirements but zero billing
+            billed_job_ids = set(bill_all["job_id"].tolist()) if not bill_all.empty else set()
+            req_job_ids    = set(req_all["job_id"].tolist())
+            unbilled_jobs  = req_job_ids - billed_job_ids
+
+            if unbilled_jobs:
+                st.warning(f"{len(unbilled_jobs)} job(s) have requirements but **no billing lines at all:**")
+                for jid in unbilled_jobs:
+                    job_row = all_jobs[all_jobs["id"] == jid]
+                    if not job_row.empty:
+                        r = job_row.iloc[0]
+                        st.write(f"  • {r['job_code']} — {r['job_name']}")
+            else:
+                st.success("All jobs with requirements also have billing lines.")
