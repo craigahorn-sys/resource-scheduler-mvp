@@ -1,3 +1,4 @@
+import datetime
 
 from __future__ import annotations
 from datetime import date
@@ -23,6 +24,7 @@ from services.scheduler import (
     create_rental_requirement, delete_rental_requirement, get_rental_requirements_df,
     delete_manual_owned_allocation, get_manual_owned_allocations_df,
     upsert_manual_owned_allocation_for_job_class, upsert_rental_requirement_for_job_class,
+    add_requirement_version, migrate_effective_dates,
 )
 
 st.set_page_config(page_title="Resource Scheduler V2", layout="wide")
@@ -86,6 +88,7 @@ engine = get_engine()
 init_db(engine)
 migrate_revenue_columns(engine)
 migrate_bidding(engine)
+migrate_effective_dates(engine)
 
 try:
     query_df(engine, "SELECT customer_color FROM jobs LIMIT 1")
@@ -464,8 +467,14 @@ def _board_row_edit_dialog(req_row: pd.Series, job_row: pd.Series, active_region
         edit_req_notes = st.text_area("Requirement Notes", value=str(req_row.get("notes", "") or ""), key=f"{key_prefix}_dlg_req_notes")
 
         st.divider()
-        col_save_req, col_del_req = st.columns(2)
-        if col_save_req.button("💾 Save Requirement", type="primary", use_container_width=True, key=f"{key_prefix}_dlg_save_req"):
+        eff_c1, eff_c2 = st.columns(2)
+        existing_eff = pd.to_datetime(req_row.get("effective_date", datetime.date.today())).date() if req_row.get("effective_date") is not None else datetime.date.today()
+        edit_eff_date = eff_c1.date_input("Effective Date", value=existing_eff, key=f"{key_prefix}_dlg_eff_date",
+            help="Date this quantity takes effect. Use 'Add New Version' to change without losing history.")
+        eff_c2.caption("**Update In-Place** edits this version.\n**Add New Version** preserves history and adds a new row effective on the selected date.")
+
+        col_save_req, col_new_ver, col_del_req = st.columns(3)
+        if col_save_req.button("💾 Update In-Place", type="primary", use_container_width=True, key=f"{key_prefix}_dlg_save_req"):
             capped_ees = min(float(edit_assigned_ees), float(edit_qty))
             update_requirement(engine, int(req_row["id"]), {
                 "resource_class_id": edit_rc_id,
@@ -474,6 +483,7 @@ def _board_row_edit_dialog(req_row: pd.Series, job_row: pd.Series, active_region
                 "days_after_job_end": int(edit_after),
                 "priority": edit_priority,
                 "notes": edit_req_notes,
+                "effective_date": edit_eff_date,
             })
             upsert_manual_owned_allocation_for_job_class(
                 engine, int(req_row["job_id"]), int(edit_rc_id), capped_ees,
@@ -485,7 +495,21 @@ def _board_row_edit_dialog(req_row: pd.Series, job_row: pd.Series, active_region
                 requirement_id=int(req_row["id"]),
             )
             st.rerun()
-        if col_del_req.button("🗑 Delete Requirement", type="secondary", use_container_width=True, key=f"{key_prefix}_dlg_del_req"):
+        if col_new_ver.button("➕ Add New Version", use_container_width=True, key=f"{key_prefix}_dlg_new_ver"):
+            add_requirement_version(
+                engine,
+                job_id=int(req_row["job_id"]),
+                resource_class_id=edit_rc_id,
+                quantity_required=float(edit_qty),
+                effective_date=edit_eff_date,
+                days_before_job_start=int(edit_before),
+                days_after_job_end=int(edit_after),
+                priority=edit_priority,
+                notes=edit_req_notes,
+            )
+            st.success(f"New version added effective {edit_eff_date}.")
+            st.rerun()
+        if col_del_req.button("🗑 Delete This Version", type="secondary", use_container_width=True, key=f"{key_prefix}_dlg_del_req"):
             delete_requirement(engine, int(req_row["id"]))
             st.rerun()
 
@@ -727,8 +751,30 @@ def render_requirements_manage_table(df: pd.DataFrame, key_prefix: str = 'req', 
                 value=str(row.get("notes", "") or ""),
                 key=f"{key_prefix}_notes_{row['id']}",
             )
-            a, b = st.columns(2)
-            if a.button("Save", key=f"{key_prefix}_save_{row['id']}"):
+            existing_eff_pop = pd.to_datetime(row.get("effective_date", datetime.date.today())).date() if row.get("effective_date") is not None else datetime.date.today()
+            edit_eff_pop = st.date_input(
+                "Effective Date",
+                value=existing_eff_pop,
+                key=f"{key_prefix}_eff_{row['id']}",
+                help="Date this requirement quantity takes effect.",
+            )
+
+            all_versions = query_df(engine, """
+                SELECT id, quantity_required, effective_date, notes
+                FROM job_requirements
+                WHERE job_id=:jid AND resource_class_id=:rcid
+                ORDER BY effective_date DESC, id DESC
+            """, {"jid": int(row["job_id"]), "rcid": int(row["resource_class_id"])})
+            if len(all_versions) > 1:
+                with st.expander(f"📋 Version history ({len(all_versions)} versions)"):
+                    for _, v in all_versions.iterrows():
+                        marker = " ← this" if int(v["id"]) == int(row["id"]) else ""
+                        st.caption(
+                            f"{pd.to_datetime(v['effective_date']).strftime('%m/%d/%Y')}  |  "                            f"Qty: {v['quantity_required']}  "                            f"{v['notes'] or ''}{marker}"
+                        )
+
+            a, b, c = st.columns(3)
+            if a.button("💾 Update", key=f"{key_prefix}_save_{row['id']}"):
                 capped_assigned_ees = min(float(edit_assigned_ees), float(edit_qty))
                 update_requirement(
                     engine,
@@ -740,6 +786,7 @@ def render_requirements_manage_table(df: pd.DataFrame, key_prefix: str = 'req', 
                         "days_after_job_end": int(edit_after),
                         "priority": edit_priority,
                         "notes": edit_notes,
+                        "effective_date": edit_eff_pop,
                     },
                 )
                 upsert_manual_owned_allocation_for_job_class(
