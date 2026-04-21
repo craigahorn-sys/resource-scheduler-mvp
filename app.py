@@ -2750,9 +2750,9 @@ def render_bidding_tab(engine):
         )
 
         if selection is None:
-            return
+            st.info("Select a customer above to view their rate card, or create a new one.")
 
-        if selection == CREATE_OPT:
+        elif selection == CREATE_OPT:
             # Show create form inline
             st.markdown("**New customer rate card**")
             nc1, nc2 = st.columns([3, 1])
@@ -2766,84 +2766,67 @@ def render_bidding_tab(engine):
                     st.rerun()
                 else:
                     st.warning("Enter a customer name first.")
-            return
 
-        selected_cust = selection
+        else:
+            selected_cust = selection
 
-        # Delete option — in a collapsed expander to prevent accidents
-        with st.expander(f"⚠️  Delete '{selected_cust}' rate card", expanded=False):
-            st.warning(
-                f"This permanently deletes all rates for **{selected_cust}**. "                f"Cannot be undone.")
-            confirm_name = st.text_input(
-                f"Type the customer name to confirm",
-                key=f"rc_delete_confirm_{selected_cust}",
-                placeholder=selected_cust,
-            )
-            if st.button("🗑️ Delete permanently", key=f"rc_delete_{selected_cust}",
-                         type="primary"):
-                if confirm_name.strip() == selected_cust:
-                    execute(engine,
-                        "DELETE FROM customer_rate_cards WHERE customer_name = :cust",
-                        {"cust": selected_cust})
-                    st.success(f"Rate card for {selected_cust} deleted.")
-                    st.rerun()
-                else:
-                    st.error("Name doesn't match — deletion cancelled.")
-
-        rc_df = get_rate_card(engine, selected_cust)
-
-        # Group by category for display
-        categories = rc_df["category"].unique().tolist()
-
-        for cat in categories:
-            cat_df = rc_df[rc_df["category"] == cat].reset_index(drop=True)
-            with st.expander(f"**{cat}**  ({len(cat_df)} items)", expanded=False):
-                # Show column headers
-                h1, h2, h3, h4, h5 = st.columns([3, 1.2, 1.2, 1.2, 1.2])
-                h1.markdown("**Item**")
-                h2.markdown("**Setup**")
-                h3.markdown("**Day Rate**")
-                h4.markdown("**Demob**")
-                h5.markdown("**Save**")
-
-                for _, row in cat_df.iterrows():
-                    c1, c2, c3, c4, c5 = st.columns([3, 1.2, 1.2, 1.2, 1.2])
-                    ikey = f"rc_{selected_cust}_{row['item_id']}"
-
-                    c1.write(row["name"])
-
-                    # Only show inputs for applicable charge types
-                    s_val = float(row["setup_rate"]) if row["setup_rate"] is not None else None
-                    d_val = float(row["day_rate"])   if row["day_rate"]   is not None else None
-                    m_val = float(row["demob_rate"]) if row["demob_rate"] is not None else None
-
-                    s_inp = c2.number_input("", value=s_val or 0.0,
-                        min_value=0.0, step=0.01, format="%.4f",
-                        key=f"{ikey}_s",
-                        disabled=not bool(row["has_setup"]),
-                        label_visibility="collapsed")
-
-                    d_inp = c3.number_input("", value=d_val or 0.0,
-                        min_value=0.0, step=0.01, format="%.4f",
-                        key=f"{ikey}_d",
-                        disabled=not bool(row["has_day_rate"]),
-                        label_visibility="collapsed")
-
-                    m_inp = c4.number_input("", value=m_val or 0.0,
-                        min_value=0.0, step=0.01, format="%.4f",
-                        key=f"{ikey}_m",
-                        disabled=not bool(row["has_demob"]),
-                        label_visibility="collapsed")
-
-                    if c5.button("💾", key=f"{ikey}_save"):
-                        upsert_rate_card_row(
-                            engine, selected_cust, int(row["item_id"]),
-                            s_inp if row["has_setup"]    else None,
-                            d_inp if row["has_day_rate"] else None,
-                            m_inp if row["has_demob"]    else None,
-                        )
-                        st.success(f"Saved {row['name']}", icon="✓")
+            with st.expander(f"⚠️  Delete '{selected_cust}' rate card", expanded=False):
+                st.warning(
+                    f"This permanently deletes all rates for **{selected_cust}**. "                    f"Cannot be undone.")
+                confirm_name = st.text_input(
+                    "Type the customer name to confirm",
+                    key=f"rc_delete_confirm_{selected_cust}",
+                    placeholder=selected_cust,
+                )
+                if st.button("🗑️ Delete permanently", key=f"rc_delete_{selected_cust}",
+                             type="primary"):
+                    if confirm_name.strip() == selected_cust:
+                        execute(engine,
+                            "DELETE FROM customer_rate_cards WHERE customer_name = :cust",
+                            {"cust": selected_cust})
+                        st.success(f"Rate card for {selected_cust} deleted.")
                         st.rerun()
+                    else:
+                        st.error("Name doesn't match — deletion cancelled.")
+
+            rc_df = get_rate_card(engine, selected_cust)
+
+            for cat in rc_df["category"].unique().tolist():
+                cat_df = rc_df[rc_df["category"] == cat].reset_index(drop=True)
+                with st.expander(f"**{cat}**  ({len(cat_df)} items)", expanded=False):
+                    h1, h2, h3, h4, h5 = st.columns([3, 1.2, 1.2, 1.2, 1.2])
+                    h1.markdown("**Item**"); h2.markdown("**Setup**")
+                    h3.markdown("**Day Rate**"); h4.markdown("**Demob**")
+                    h5.markdown("**Save**")
+
+                    for _, row in cat_df.iterrows():
+                        c1, c2, c3, c4, c5 = st.columns([3, 1.2, 1.2, 1.2, 1.2])
+                        ikey = f"rc_{selected_cust}_{row['item_id']}"
+                        c1.write(row["name"])
+                        s_val = float(row["setup_rate"]) if row["setup_rate"] is not None else None
+                        d_val = float(row["day_rate"])   if row["day_rate"]   is not None else None
+                        m_val = float(row["demob_rate"]) if row["demob_rate"] is not None else None
+                        s_inp = c2.number_input("", value=s_val or 0.0, min_value=0.0,
+                            step=0.01, format="%.4f", key=f"{ikey}_s",
+                            disabled=not bool(row["has_setup"]),
+                            label_visibility="collapsed")
+                        d_inp = c3.number_input("", value=d_val or 0.0, min_value=0.0,
+                            step=0.01, format="%.4f", key=f"{ikey}_d",
+                            disabled=not bool(row["has_day_rate"]),
+                            label_visibility="collapsed")
+                        m_inp = c4.number_input("", value=m_val or 0.0, min_value=0.0,
+                            step=0.01, format="%.4f", key=f"{ikey}_m",
+                            disabled=not bool(row["has_demob"]),
+                            label_visibility="collapsed")
+                        if c5.button("💾", key=f"{ikey}_save"):
+                            upsert_rate_card_row(
+                                engine, selected_cust, int(row["item_id"]),
+                                s_inp if row["has_setup"]    else None,
+                                d_inp if row["has_day_rate"] else None,
+                                m_inp if row["has_demob"]    else None,
+                            )
+                            st.success(f"Saved {row['name']}", icon="✓")
+                            st.rerun()
 
     # ═════════════════════════════════════════════════════════════════════════
     # BIDS LIST TAB
