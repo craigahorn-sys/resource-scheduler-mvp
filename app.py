@@ -1,6 +1,5 @@
 
 from __future__ import annotations
-import datetime
 from datetime import date
 import pandas as pd
 import plotly.express as px
@@ -25,6 +24,8 @@ from services.scheduler import (
     delete_manual_owned_allocation, get_manual_owned_allocations_df,
     upsert_manual_owned_allocation_for_job_class, upsert_rental_requirement_for_job_class,
     add_requirement_version, migrate_effective_dates,
+    migrate_snapshots, take_daily_snapshot, get_utilization_history,
+    get_job_snapshot_history, get_actuals_requirements, get_actuals_billing,
 )
 
 st.set_page_config(page_title="Resource Scheduler V2", layout="wide")
@@ -89,6 +90,8 @@ init_db(engine)
 migrate_revenue_columns(engine)
 migrate_bidding(engine)
 migrate_effective_dates(engine)
+migrate_snapshots(engine)
+take_daily_snapshot(engine)
 
 try:
     query_df(engine, "SELECT customer_color FROM jobs LIMIT 1")
@@ -467,14 +470,8 @@ def _board_row_edit_dialog(req_row: pd.Series, job_row: pd.Series, active_region
         edit_req_notes = st.text_area("Requirement Notes", value=str(req_row.get("notes", "") or ""), key=f"{key_prefix}_dlg_req_notes")
 
         st.divider()
-        eff_c1, eff_c2 = st.columns(2)
-        existing_eff = pd.to_datetime(req_row.get("effective_date", datetime.date.today())).date() if req_row.get("effective_date") is not None else datetime.date.today()
-        edit_eff_date = eff_c1.date_input("Effective Date", value=existing_eff, key=f"{key_prefix}_dlg_eff_date",
-            help="Date this quantity takes effect. Use 'Add New Version' to change without losing history.")
-        eff_c2.caption("**Update In-Place** edits this version.\n**Add New Version** preserves history and adds a new row effective on the selected date.")
-
-        col_save_req, col_new_ver, col_del_req = st.columns(3)
-        if col_save_req.button("💾 Update In-Place", type="primary", use_container_width=True, key=f"{key_prefix}_dlg_save_req"):
+        col_save_req, col_del_req = st.columns(2)
+        if col_save_req.button("💾 Save Requirement", type="primary", use_container_width=True, key=f"{key_prefix}_dlg_save_req"):
             capped_ees = min(float(edit_assigned_ees), float(edit_qty))
             update_requirement(engine, int(req_row["id"]), {
                 "resource_class_id": edit_rc_id,
@@ -483,7 +480,6 @@ def _board_row_edit_dialog(req_row: pd.Series, job_row: pd.Series, active_region
                 "days_after_job_end": int(edit_after),
                 "priority": edit_priority,
                 "notes": edit_req_notes,
-                "effective_date": edit_eff_date,
             })
             upsert_manual_owned_allocation_for_job_class(
                 engine, int(req_row["job_id"]), int(edit_rc_id), capped_ees,
@@ -495,21 +491,7 @@ def _board_row_edit_dialog(req_row: pd.Series, job_row: pd.Series, active_region
                 requirement_id=int(req_row["id"]),
             )
             st.rerun()
-        if col_new_ver.button("➕ Add New Version", use_container_width=True, key=f"{key_prefix}_dlg_new_ver"):
-            add_requirement_version(
-                engine,
-                job_id=int(req_row["job_id"]),
-                resource_class_id=edit_rc_id,
-                quantity_required=float(edit_qty),
-                effective_date=edit_eff_date,
-                days_before_job_start=int(edit_before),
-                days_after_job_end=int(edit_after),
-                priority=edit_priority,
-                notes=edit_req_notes,
-            )
-            st.success(f"New version added effective {edit_eff_date}.")
-            st.rerun()
-        if col_del_req.button("🗑 Delete This Version", type="secondary", use_container_width=True, key=f"{key_prefix}_dlg_del_req"):
+        if col_del_req.button("🗑 Delete Requirement", type="secondary", use_container_width=True, key=f"{key_prefix}_dlg_del_req"):
             delete_requirement(engine, int(req_row["id"]))
             st.rerun()
 
@@ -751,30 +733,8 @@ def render_requirements_manage_table(df: pd.DataFrame, key_prefix: str = 'req', 
                 value=str(row.get("notes", "") or ""),
                 key=f"{key_prefix}_notes_{row['id']}",
             )
-            existing_eff_pop = pd.to_datetime(row.get("effective_date", datetime.date.today())).date() if row.get("effective_date") is not None else datetime.date.today()
-            edit_eff_pop = st.date_input(
-                "Effective Date",
-                value=existing_eff_pop,
-                key=f"{key_prefix}_eff_{row['id']}",
-                help="Date this requirement quantity takes effect.",
-            )
-
-            all_versions = query_df(engine, """
-                SELECT id, quantity_required, effective_date, notes
-                FROM job_requirements
-                WHERE job_id=:jid AND resource_class_id=:rcid
-                ORDER BY effective_date DESC, id DESC
-            """, {"jid": int(row["job_id"]), "rcid": int(row["resource_class_id"])})
-            if len(all_versions) > 1:
-                with st.expander(f"📋 Version history ({len(all_versions)} versions)"):
-                    for _, v in all_versions.iterrows():
-                        marker = " ← this" if int(v["id"]) == int(row["id"]) else ""
-                        st.caption(
-                            f"{pd.to_datetime(v['effective_date']).strftime('%m/%d/%Y')}  |  "                            f"Qty: {v['quantity_required']}  "                            f"{v['notes'] or ''}{marker}"
-                        )
-
-            a, b, c = st.columns(3)
-            if a.button("💾 Update", key=f"{key_prefix}_save_{row['id']}"):
+            a, b = st.columns(2)
+            if a.button("Save", key=f"{key_prefix}_save_{row['id']}"):
                 capped_assigned_ees = min(float(edit_assigned_ees), float(edit_qty))
                 update_requirement(
                     engine,
@@ -786,7 +746,6 @@ def render_requirements_manage_table(df: pd.DataFrame, key_prefix: str = 'req', 
                         "days_after_job_end": int(edit_after),
                         "priority": edit_priority,
                         "notes": edit_notes,
-                        "effective_date": edit_eff_pop,
                     },
                 )
                 upsert_manual_owned_allocation_for_job_class(
@@ -811,21 +770,7 @@ def render_requirements_manage_table(df: pd.DataFrame, key_prefix: str = 'req', 
                     requirement_id=int(row["id"]),
                 )
                 st.rerun()
-            if b.button("➕ New Version", key=f"{key_prefix}_newver_{row['id']}"):
-                add_requirement_version(
-                    engine,
-                    job_id=int(row["job_id"]),
-                    resource_class_id=edit_rc_id,
-                    quantity_required=float(edit_qty),
-                    effective_date=edit_eff_pop,
-                    days_before_job_start=int(edit_before),
-                    days_after_job_end=int(edit_after),
-                    priority=edit_priority,
-                    notes=edit_notes,
-                )
-                st.success(f"Version added effective {edit_eff_pop}.")
-                st.rerun()
-            if c.button("🗑 Delete", key=f"{key_prefix}_delete_{row['id']}"):
+            if b.button("Delete", key=f"{key_prefix}_delete_{row['id']}"):
                 delete_requirement(engine, int(row["id"]))
                 st.rerun()
 
@@ -1599,8 +1544,8 @@ if "last_active_region" not in st.session_state:
 if st.session_state["last_active_region"] != ACTIVE_REGION:
     st.session_state["last_active_region"] = ACTIVE_REGION
 
-tab_jobs, tab_job_requirements, tab_planning, tab_pools, tab_requirements, tab_allocations, tab_revenue, tab_bidding = st.tabs(
-    ["Jobs", "Job Requirements", "Planning Board", "Pools", "Requirements", "Allocations", "Revenue", "Bidding"]
+tab_jobs, tab_job_requirements, tab_planning, tab_pools, tab_requirements, tab_allocations, tab_revenue, tab_bidding, tab_history = st.tabs(
+    ["Jobs", "Job Requirements", "Planning Board", "Pools", "Requirements", "Allocations", "Revenue", "Bidding", "📈 History"]
 )
 
 with tab_jobs:
@@ -3342,3 +3287,312 @@ def render_bidding_tab(engine):
 
 with tab_bidding:
     render_bidding_tab(engine)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# UTILIZATION HISTORY TAB
+# ─────────────────────────────────────────────────────────────────────────────
+with tab_history:
+    import datetime as _dt
+
+    st.subheader("Utilization History")
+
+    # Manual snapshot button
+    snap_col, _ = st.columns([1, 3])
+    if snap_col.button("📸 Capture Today's Snapshot", key="manual_snapshot"):
+        if take_daily_snapshot(engine):
+            st.success("Snapshot captured.")
+        else:
+            st.info("Today's snapshot already exists.")
+
+    hist_sub1, hist_sub2, hist_sub3 = st.tabs([
+        "📸 Schedule History", "✅ Actuals", "🔍 Requirements vs Billing"
+    ])
+
+    # ── Shared filters ────────────────────────────────────────────────────────
+    regions_list = query_df(engine, "SELECT region_code FROM regions ORDER BY region_code")
+    region_opts  = ["All"] + regions_list["region_code"].tolist() if not regions_list.empty else ["All"]
+
+    # ═════════════════════════════════════════════════════════════════════════
+    # TAB 1 — SCHEDULE HISTORY (snapshots)
+    # ═════════════════════════════════════════════════════════════════════════
+    with hist_sub1:
+        st.caption(
+            "Shows how the schedule looked on each day the app was open. "
+            "Reflects the plan as it existed on that date, not adjusted actuals."
+        )
+
+        hist_df = get_utilization_history(engine)
+        if hist_df.empty:
+            st.info("No snapshot data yet — snapshots capture automatically each time the app loads.")
+        else:
+            hist_df["snapshot_date"] = pd.to_datetime(hist_df["snapshot_date"]).dt.date
+            date_min = hist_df["snapshot_date"].min()
+            date_max = hist_df["snapshot_date"].max()
+
+            hf1, hf2, hf3, hf4 = st.columns(4)
+            sel_region  = hf1.selectbox("Region", region_opts, key="sh_region")
+            all_classes = ["All"] + sorted(hist_df["class_name"].unique().tolist())
+            sel_class   = hf2.selectbox("Resource Class", all_classes, key="sh_class")
+            date_from   = hf3.date_input("From", value=date_min, min_value=date_min, max_value=date_max, key="sh_from")
+            date_to     = hf4.date_input("To",   value=date_max, min_value=date_min, max_value=date_max, key="sh_to")
+
+            filt = hist_df[(hist_df["snapshot_date"] >= date_from) & (hist_df["snapshot_date"] <= date_to)].copy()
+            if sel_region != "All": filt = filt[filt["region_code"] == sel_region]
+            if sel_class  != "All": filt = filt[filt["class_name"]  == sel_class]
+
+            if filt.empty:
+                st.warning("No data for selected filters.")
+            else:
+                # Utilization % chart
+                chart = filt.dropna(subset=["utilization_pct"]).copy()
+                if not chart.empty:
+                    color_col = "class_name" if sel_class == "All" else "region_code"
+                    if sel_class == "All":
+                        top = chart.groupby("class_name")["utilization_pct"].mean().nlargest(8).index
+                        chart = chart[chart["class_name"].isin(top)]
+                    st.markdown("**Utilization % Over Time**")
+                    fig = px.line(chart, x="snapshot_date", y="utilization_pct",
+                                  color=color_col, markers=True,
+                                  labels={"snapshot_date":"Date","utilization_pct":"Utilization %"})
+                    fig.update_layout(yaxis_ticksuffix="%", height=350,
+                                      margin=dict(l=0,r=0,t=10,b=0))
+                    st.plotly_chart(fig, use_container_width=True)
+
+                # Pool vs Required
+                st.markdown("**Pool Available vs Required**")
+                agg = filt.groupby(["snapshot_date","region_code"]).agg(
+                    pool_total=("pool_total","sum"),
+                    total_required=("total_required","sum"),
+                    allocated_ees=("allocated_ees","sum"),
+                    allocated_rental=("allocated_rental","sum"),
+                ).reset_index()
+                fig2 = px.area(agg, x="snapshot_date",
+                               y=["allocated_ees","allocated_rental","pool_total"],
+                               color_discrete_map={"pool_total":"lightgray",
+                                                   "allocated_ees":"steelblue",
+                                                   "allocated_rental":"orange"},
+                               labels={"snapshot_date":"Date","value":"Quantity",
+                                       "variable":""},
+                               height=320)
+                fig2.update_layout(margin=dict(l=0,r=0,t=10,b=0))
+                st.plotly_chart(fig2, use_container_width=True)
+
+                # Raw table + download
+                with st.expander("View raw data"):
+                    st.dataframe(filt, hide_index=True, use_container_width=True)
+                    st.download_button("⬇️ Download CSV",
+                        filt.to_csv(index=False).encode(),
+                        f"schedule_history_{date_from}_{date_to}.csv",
+                        mime="text/csv", key="sh_download")
+
+    # ═════════════════════════════════════════════════════════════════════════
+    # TAB 2 — ACTUALS (current data, reflects any date adjustments)
+    # ═════════════════════════════════════════════════════════════════════════
+    with hist_sub2:
+        st.caption(
+            "Computed fresh from current job requirements and billing line items. "
+            "Always reflects actual dates — if a job ran longer, this shows it."
+        )
+
+        af1, af2 = st.columns(2)
+        sel_act_region = af1.selectbox("Region", region_opts, key="act_region")
+        act_date = af2.date_input("View as of date", value=_dt.date.today(), key="act_date")
+
+        region_filter = None if sel_act_region == "All" else sel_act_region
+
+        req_df  = get_actuals_requirements(engine, region_filter)
+        bill_df = get_actuals_billing(engine, region_filter)
+
+        if not req_df.empty:
+            req_df["required_start"] = pd.to_datetime(req_df["required_start"]).dt.date
+            req_df["required_end"]   = pd.to_datetime(req_df["required_end"]).dt.date
+
+        # Filter to active on act_date
+        active_req = req_df[
+            (req_df["required_start"] <= act_date) &
+            (req_df["required_end"]   >= act_date)
+        ].copy() if not req_df.empty else pd.DataFrame()
+
+        active_bill = pd.DataFrame()
+        if not bill_df.empty:
+            bill_df["start_date"] = pd.to_datetime(bill_df["start_date"], errors="coerce").dt.date
+            bill_df["end_date"]   = pd.to_datetime(bill_df["end_date"],   errors="coerce").dt.date
+            # Items with dates that cover act_date, OR items with no dates (lump charges)
+            mask_dated = (
+                bill_df["start_date"].notna() &
+                (bill_df["start_date"] <= act_date) &
+                (bill_df["end_date"]   >= act_date)
+            )
+            mask_undated = bill_df["start_date"].isna()
+            active_bill = bill_df[mask_dated | mask_undated].copy()
+
+        st.markdown(f"**Active as of {act_date.strftime('%m/%d/%Y')}**")
+
+        ac1, ac2, ac3 = st.columns(3)
+        ac1.metric("Active Requirements", len(active_req) if not active_req.empty else 0)
+        ac2.metric("Active Billing Lines", len(active_bill) if not active_bill.empty else 0)
+
+        # Requirements breakdown
+        if not active_req.empty:
+            st.markdown("**Requirements (from job requirements)**")
+            req_display = active_req[[
+                "job_code","job_name","customer","class_name",
+                "quantity_required","quantity_assigned_manual","quantity_assigned_rental",
+                "required_start","required_end","allocation_status"
+            ]].copy()
+            req_display.columns = [
+                "Job Code","Job Name","Customer","Resource",
+                "Qty Required","EES Allocated","Rental Allocated",
+                "Start","End","Status"
+            ]
+            st.dataframe(req_display, hide_index=True, use_container_width=True)
+
+        # Billing breakdown
+        if not active_bill.empty:
+            st.markdown("**Billing Lines (from revenue line items)**")
+            bill_display = active_bill[[
+                "job_code","job_name","customer","description",
+                "uom","invoice_qty","unit_price","line_total",
+                "start_date","end_date"
+            ]].copy()
+            bill_display.columns = [
+                "Job Code","Job Name","Customer","Description",
+                "UOM","Qty","Unit Price","Line Total","Start","End"
+            ]
+            st.dataframe(bill_display, hide_index=True, use_container_width=True)
+
+        if active_req.empty and active_bill.empty:
+            st.info(f"No active requirements or billing lines on {act_date}.")
+
+    # ═════════════════════════════════════════════════════════════════════════
+    # TAB 3 — REQUIREMENTS vs BILLING (gap analysis)
+    # ═════════════════════════════════════════════════════════════════════════
+    with hist_sub3:
+        st.caption(
+            "Shows requirements and billing side by side per job. "
+            "Gaps indicate items in requirements that never made it onto a ticket. "
+            "Bid-linked jobs show automatic matching; manual jobs show side-by-side for eyeballing."
+        )
+
+        gf1, gf2 = st.columns(2)
+        sel_gap_region = gf1.selectbox("Region", region_opts, key="gap_region")
+        gap_region = None if sel_gap_region == "All" else sel_gap_region
+
+        all_jobs = query_df(engine,
+            "SELECT id, job_code, job_name, customer FROM jobs ORDER BY job_code")
+        if not all_jobs.empty:
+            job_opts = ["All Jobs"] + [
+                f"{r['job_code']} — {r['job_name']}"
+                for _, r in all_jobs.iterrows()
+            ]
+            sel_job_label = gf2.selectbox("Job", job_opts, key="gap_job")
+            sel_job_id = None
+            if sel_job_label != "All Jobs":
+                sel_job_code = sel_job_label.split(" — ")[0]
+                match = all_jobs[all_jobs["job_code"] == sel_job_code]
+                if not match.empty:
+                    sel_job_id = int(match.iloc[0]["id"])
+
+        req_all  = get_actuals_requirements(engine, gap_region)
+        bill_all = get_actuals_billing(engine, gap_region)
+
+        if sel_job_id:
+            if not req_all.empty:
+                req_all = req_all[req_all["job_id"] == sel_job_id]
+            if not bill_all.empty:
+                bill_all = bill_all[bill_all["job_id"] == sel_job_id]
+
+        # ── Requirements side ─────────────────────────────────────────────────
+        col_req, col_bill = st.columns(2)
+
+        with col_req:
+            st.markdown("#### 📋 Requirements")
+            if req_all.empty:
+                st.info("No requirements.")
+            else:
+                for job_id, job_reqs in req_all.groupby("job_id"):
+                    job_info = job_reqs.iloc[0]
+                    with st.expander(
+                        f"**{job_info['job_code']}** — {job_info['job_name']} "
+                        f"({job_info.get('customer','') or '—'})",
+                        expanded=(sel_job_id is not None)
+                    ):
+                        # Check if bid-linked
+                        bid_check = query_df(engine,
+                            "SELECT id FROM bids WHERE job_id=:jid",
+                            {"jid": int(job_id)})
+                        if not bid_check.empty:
+                            st.caption("🔗 Bid-linked — automatic matching available")
+
+                        for _, req in job_reqs.iterrows():
+                            ees    = float(req.get("quantity_assigned_manual", 0))
+                            rental = float(req.get("quantity_assigned_rental", 0))
+                            total  = ees + rental
+                            qty    = float(req["quantity_required"])
+                            gap    = qty - total
+                            color  = "🔴" if gap > 0 else "🟢"
+                            st.write(
+                                f"{color} **{req['class_name']}** — "
+                                f"Required: {qty} {req['unit_type']} | "
+                                f"EES: {ees} | Rental: {rental}"
+                            )
+                            if gap > 0:
+                                st.caption(f"⚠️ Shortfall: {gap} {req['unit_type']}")
+
+        with col_bill:
+            st.markdown("#### 💰 Billing Lines")
+            if bill_all.empty:
+                st.info("No billing line items.")
+            else:
+                for job_id, job_bills in bill_all.groupby("job_id"):
+                    job_info = job_bills.iloc[0]
+                    is_bid_linked = not query_df(engine,
+                        "SELECT id FROM bids WHERE job_id=:jid",
+                        {"jid": int(job_id)}).empty
+
+                    with st.expander(
+                        f"**{job_info['job_code']}** — {job_info['job_name']} "
+                        f"({job_info.get('customer','') or '—'})",
+                        expanded=(sel_job_id is not None)
+                    ):
+                        if is_bid_linked:
+                            st.caption("🔗 Bid-linked")
+
+                        job_total = 0.0
+                        for _, li in job_bills.iterrows():
+                            lt = float(li["line_total"] or 0) if li["line_total"] is not None else 0.0
+                            job_total += lt
+                            date_str = ""
+                            if li.get("start_date") and li.get("end_date"):
+                                date_str = (f" | {li['start_date']} → {li['end_date']}")
+                            elif li.get("start_date"):
+                                date_str = f" | {li['start_date']}"
+                            st.write(
+                                f"**{li['description']}** — "
+                                f"{li['invoice_qty']} {li['uom']} × "
+                                f"${float(li['unit_price'] or 0):,.2f} = "
+                                f"**${lt:,.2f}**{date_str}"
+                            )
+                        st.markdown(f"**Job Total: ${job_total:,.2f}**")
+
+        # ── Gap summary table (for jobs with both req and billing) ────────────
+        st.divider()
+        st.markdown("#### Gap Summary — Items in Requirements Not Billed")
+        st.caption("For bid-linked jobs this is automatic. For manual jobs, review the side-by-side above.")
+
+        if not req_all.empty:
+            # Jobs with requirements but zero billing
+            billed_job_ids = set(bill_all["job_id"].tolist()) if not bill_all.empty else set()
+            req_job_ids    = set(req_all["job_id"].tolist())
+            unbilled_jobs  = req_job_ids - billed_job_ids
+
+            if unbilled_jobs:
+                st.warning(f"{len(unbilled_jobs)} job(s) have requirements but **no billing lines at all:**")
+                for jid in unbilled_jobs:
+                    job_row = all_jobs[all_jobs["id"] == jid]
+                    if not job_row.empty:
+                        r = job_row.iloc[0]
+                        st.write(f"  • {r['job_code']} — {r['job_name']}")
+            else:
+                st.success("All jobs with requirements also have billing lines.")
