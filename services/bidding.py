@@ -389,30 +389,27 @@ def migrate_bidding(engine):
                 "sort_order": sort_order,
             })
 
-    # Seed rate cards for known customers — one transaction per customer
-    # to avoid deadlocks when multiple migrations run concurrently on startup
-    with engine.connect() as conn_lookup:
-        rows = conn_lookup.execute(text("SELECT id, name FROM bid_catalog")).fetchall()
-    item_ids = {row[1]: row[0] for row in rows}
+    # Seed rate cards for known customers
+    with engine.begin() as conn:
+        # Fetch catalog id lookup
+        rows = conn.execute(text("SELECT id, name FROM bid_catalog")).fetchall()
+        item_ids = {row[1]: row[0] for row in rows}
 
-    for customer, rates in SEED_CUSTOMERS.items():
-        try:
-            with engine.begin() as conn:
-                for item_name, item_id in item_ids.items():
-                    s, d, m = rates.get(item_name, (None, None, None))
-                    conn.execute(text("""
-                        INSERT INTO customer_rate_cards
-                            (customer_name, item_id, setup_rate, day_rate, demob_rate)
-                        VALUES (:cust, :item_id, :s, :d, :m)
-                        ON CONFLICT (customer_name, item_id) DO UPDATE SET
-                            setup_rate = EXCLUDED.setup_rate,
-                            day_rate   = EXCLUDED.day_rate,
-                            demob_rate = EXCLUDED.demob_rate,
-                            updated_at = CURRENT_TIMESTAMP
-                    """), {"cust": customer, "item_id": item_id,
-                           "s": s, "d": d, "m": m})
-        except Exception:
-            pass  # Already seeded or transient error — safe to skip
+        for customer, rates in SEED_CUSTOMERS.items():
+            # Ensure every catalog item exists for this customer (NULL rates)
+            for item_name, item_id in item_ids.items():
+                s, d, m = rates.get(item_name, (None, None, None))
+                conn.execute(text("""
+                    INSERT INTO customer_rate_cards
+                        (customer_name, item_id, setup_rate, day_rate, demob_rate)
+                    VALUES (:cust, :item_id, :s, :d, :m)
+                    ON CONFLICT (customer_name, item_id) DO UPDATE SET
+                        setup_rate = EXCLUDED.setup_rate,
+                        day_rate   = EXCLUDED.day_rate,
+                        demob_rate = EXCLUDED.demob_rate,
+                        updated_at = CURRENT_TIMESTAMP
+                """), {"cust": customer, "item_id": item_id,
+                       "s": s, "d": d, "m": m})
 
 
 # ─────────────────────────────────────────────────────────────────────────────
