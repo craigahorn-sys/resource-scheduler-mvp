@@ -389,27 +389,29 @@ def migrate_bidding(engine):
                 "sort_order": sort_order,
             })
 
-    # Seed rate cards for known customers
-    with engine.begin() as conn:
-        # Fetch catalog id lookup
-        rows = conn.execute(text("SELECT id, name FROM bid_catalog")).fetchall()
-        item_ids = {row[1]: row[0] for row in rows}
+    # Seed rate cards — one transaction per customer to avoid startup deadlocks
+    with engine.connect() as conn_lookup:
+        rows = conn_lookup.execute(text("SELECT id, name FROM bid_catalog")).fetchall()
+    item_ids = {row[1]: row[0] for row in rows}
 
-        for customer, rates in SEED_CUSTOMERS.items():
-            # Ensure every catalog item exists for this customer (NULL rates)
-            for item_name, item_id in item_ids.items():
-                s, d, m = rates.get(item_name, (None, None, None))
-                conn.execute(text("""
-                    INSERT INTO customer_rate_cards
-                        (customer_name, item_id, setup_rate, day_rate, demob_rate)
-                    VALUES (:cust, :item_id, :s, :d, :m)
-                    ON CONFLICT (customer_name, item_id) DO UPDATE SET
-                        setup_rate = EXCLUDED.setup_rate,
-                        day_rate   = EXCLUDED.day_rate,
-                        demob_rate = EXCLUDED.demob_rate,
-                        updated_at = CURRENT_TIMESTAMP
-                """), {"cust": customer, "item_id": item_id,
-                       "s": s, "d": d, "m": m})
+    for customer, rates in SEED_CUSTOMERS.items():
+        try:
+            with engine.begin() as conn:
+                for item_name, item_id in item_ids.items():
+                    s, d, m = rates.get(item_name, (None, None, None))
+                    conn.execute(text("""
+                        INSERT INTO customer_rate_cards
+                            (customer_name, item_id, setup_rate, day_rate, demob_rate)
+                        VALUES (:cust, :item_id, :s, :d, :m)
+                        ON CONFLICT (customer_name, item_id) DO UPDATE SET
+                            setup_rate = EXCLUDED.setup_rate,
+                            day_rate   = EXCLUDED.day_rate,
+                            demob_rate = EXCLUDED.demob_rate,
+                            updated_at = CURRENT_TIMESTAMP
+                    """), {"cust": customer, "item_id": item_id,
+                           "s": s, "d": d, "m": m})
+        except Exception:
+            pass
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -540,6 +542,7 @@ def save_bid(engine, data: dict) -> int:
                 setup_override=:setup_override,
                 demob_override=:demob_override,
                 per_bbl_override=:per_bbl_override,
+                job_id=:job_id,
                 notes=:notes,
                 updated_at=CURRENT_TIMESTAMP
             WHERE id=:id
@@ -553,13 +556,13 @@ def save_bid(engine, data: dict) -> int:
                      bid_days, total_bbls, hrs_per_shift,
                      labor_general, labor_lead, labor_supervisor, trucks,
                      day_rate_override, setup_override, demob_override,
-                     per_bbl_override, notes)
+                     per_bbl_override, job_id, notes)
                 VALUES
                     (:bid_name, :customer, :rate_card, :region_code, :billing_type, :status,
                      :bid_days, :total_bbls, :hrs_per_shift,
                      :labor_general, :labor_lead, :labor_supervisor, :trucks,
                      :day_rate_override, :setup_override, :demob_override,
-                     :per_bbl_override, :notes)
+                     :per_bbl_override, :job_id, :notes)
                 RETURNING id
             """), data).fetchone()
             return row[0]
