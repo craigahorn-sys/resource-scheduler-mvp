@@ -80,6 +80,49 @@ def get_jobs_df(engine):
     return df
 
 
+def migrate_effective_dates(engine):
+    """Add effective_date column to job_requirements if missing. Safe to call repeatedly."""
+    try:
+        with engine.begin() as conn:
+            conn.execute(text(
+                "ALTER TABLE job_requirements ADD COLUMN IF NOT EXISTS "
+                "effective_date DATE NOT NULL DEFAULT CURRENT_DATE"
+            ))
+    except Exception:
+        pass
+
+
+def add_requirement_version(engine, job_id: int, resource_class_id: int,
+                             quantity_required: float, effective_date,
+                             days_before_job_start: int = 0,
+                             days_after_job_end: int = 0,
+                             priority: str = "Normal", notes: str = ""):
+    """Insert a new versioned requirement row without touching existing versions."""
+    import datetime as _dt
+    if not isinstance(effective_date, _dt.date):
+        effective_date = pd.to_datetime(effective_date).date()
+    with engine.begin() as conn:
+        res = conn.execute(text("""
+            INSERT INTO job_requirements(
+                job_id, resource_class_id, quantity_required,
+                days_before_job_start, days_after_job_end,
+                priority, notes, effective_date)
+            VALUES (
+                :job_id, :resource_class_id, :qty,
+                :days_before, :days_after,
+                :priority, :notes, :eff_date)
+            RETURNING id
+        """), {
+            "job_id": job_id, "resource_class_id": resource_class_id,
+            "qty": quantity_required, "days_before": days_before_job_start,
+            "days_after": days_after_job_end, "priority": priority,
+            "notes": notes, "eff_date": effective_date,
+        })
+        new_id = int(res.scalar_one())
+    recalc_all_requirements(engine)
+    return new_id
+
+
 def _requirement_base_df(engine):
     df = query_df(engine, """
         SELECT
