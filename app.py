@@ -2844,7 +2844,10 @@ def render_bidding_tab(engine):
                         ikey = f"rc_{selected_cust}_{row['item_id']}"
                         c1.write(row["name"])
 
-                    # Only show inputs for applicable charge types
+                    # has_* from catalog — NULL from LEFT JOIN treated as True
+                    _has_s = row["has_setup"]    not in (False, 0, None) or row["setup_rate"] is not None
+                    _has_d = row["has_day_rate"] not in (False, 0, None) or row["day_rate"]   is not None
+                    _has_m = row["has_demob"]    not in (False, 0, None) or row["demob_rate"] is not None
                     s_val = float(row["setup_rate"]) if row["setup_rate"] is not None else None
                     d_val = float(row["day_rate"])   if row["day_rate"]   is not None else None
                     m_val = float(row["demob_rate"]) if row["demob_rate"] is not None else None
@@ -2852,27 +2855,27 @@ def render_bidding_tab(engine):
                     s_inp = c2.number_input("", value=s_val or 0.0,
                         min_value=0.0, step=0.01, format="%.4f",
                         key=f"{ikey}_s",
-                        disabled=not bool(row["has_setup"]),
+                        disabled=not _has_s,
                         label_visibility="collapsed")
 
                     d_inp = c3.number_input("", value=d_val or 0.0,
                         min_value=0.0, step=0.01, format="%.4f",
                         key=f"{ikey}_d",
-                        disabled=not bool(row["has_day_rate"]),
+                        disabled=not _has_d,
                         label_visibility="collapsed")
 
                     m_inp = c4.number_input("", value=m_val or 0.0,
                         min_value=0.0, step=0.01, format="%.4f",
                         key=f"{ikey}_m",
-                        disabled=not bool(row["has_demob"]),
+                        disabled=not _has_m,
                         label_visibility="collapsed")
 
                     if c5.button("💾", key=f"{ikey}_save"):
                         upsert_rate_card_row(
                             engine, selected_cust, int(row["item_id"]),
-                            s_inp if row["has_setup"]    else None,
-                            d_inp if row["has_day_rate"] else None,
-                            m_inp if row["has_demob"]    else None,
+                            s_inp if _has_s else None,
+                            d_inp if _has_d else None,
+                            m_inp if _has_m else None,
                         )
                         st.success(f"Saved {row['name']}", icon="✓")
                         st.rerun()
@@ -3048,9 +3051,9 @@ def render_bidding_tab(engine):
         )
         customer_has_rc = bid_customer.strip() in rc_names
         if bid_customer.strip() and not customer_has_rc:
-            rc1.caption(f"ℹ️ No rate card for **{bid_customer.strip()}** — "                        f"using **{bid_rate_card}** pricing.")
+            rc2.caption(f"ℹ️ No rate card for **{bid_customer.strip()}** — "                        f"using **{bid_rate_card}** pricing.")
         elif customer_has_rc and bid_rate_card != bid_customer.strip():
-            rc2.caption(f"ℹ️ Using **{bid_rate_card}** pricing.")
+            rc2.caption(f"ℹ️ Using **{bid_rate_card}** pricing "                        f"(not {bid_customer.strip()}).")
 
         # Job Name (linked to jobs) + Status
         jn1, jn2 = st.columns([3, 1])
@@ -3275,7 +3278,17 @@ def render_bidding_tab(engine):
         if bid_items_calc.empty:
             st.info("No equipment entered yet.")
         else:
-            calc = calc_bid(bid_obj, bid_items_calc)
+            # Build a working copy of bid_obj using current widget values
+            # so Crew & Shift params are live without requiring a Save first
+            import copy
+            bid_obj_live = bid_obj.copy()
+            bid_obj_live["hrs_per_shift"]    = float(st.session_state.get("bb_hrs_shift", bid_obj.get("hrs_per_shift") or 14))
+            bid_obj_live["labor_general"]    = int(st.session_state.get("bb_labor_gen",  bid_obj.get("labor_general") or 0))
+            bid_obj_live["labor_lead"]       = int(st.session_state.get("bb_labor_lead", bid_obj.get("labor_lead") or 0))
+            bid_obj_live["labor_supervisor"] = int(st.session_state.get("bb_labor_sup",  bid_obj.get("labor_supervisor") or 0))
+            bid_obj_live["trucks"]           = int(st.session_state.get("bb_trucks",     bid_obj.get("trucks") or 0))
+            bid_obj_live["bid_days"]         = int(st.session_state.get("bb_bid_days",   bid_obj.get("bid_days") or 0))
+            calc = calc_bid(bid_obj_live, bid_items_calc)
 
             # ── Price overrides — shown always, applied to all billing types ──
             st.markdown("**Price Overrides** — leave at 0 to use calculated value")
