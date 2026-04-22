@@ -697,9 +697,14 @@ def calc_bid(bid: pd.Series, items: pd.DataFrame) -> dict:
             if line:
                 demob_lines.append(line)
 
-    setup_total  = sum(l["total"] for l in setup_lines)
-    day_total    = sum(l["total"] for l in day_lines)
-    demob_total  = sum(l["total"] for l in demob_lines)
+    def _safe_sum(lines):
+        import math
+        return sum(l["total"] for l in lines
+                   if l["total"] is not None and not math.isnan(l["total"]))
+
+    setup_total  = _safe_sum(setup_lines)
+    day_total    = _safe_sum(day_lines)
+    demob_total  = _safe_sum(demob_lines)
     job_cost     = setup_total + (day_total * bid_days) + demob_total
     cost_per_bbl = (job_cost / total_bbls) if total_bbls > 0 else None
 
@@ -721,7 +726,10 @@ def _to_f(val):
     if val is None:
         return None
     try:
+        import math
         f = float(val)
+        if math.isnan(f) or math.isinf(f):
+            return None
         return f if f != 0 else None
     except Exception:
         return None
