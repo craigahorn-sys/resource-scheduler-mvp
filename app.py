@@ -2877,7 +2877,7 @@ def render_bidding_tab(engine):
                                 d_inp if _has_d else None,
                                 m_inp if _has_m else None,
                             )
-                            st.success(f"Saved {row['name']}", icon="✓")
+                            st.success(f"Saved {row['name']}", icon="✅")
                             st.rerun()
 
     # ═════════════════════════════════════════════════════════════════════════
