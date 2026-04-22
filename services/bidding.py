@@ -17,6 +17,13 @@ BID_CATALOG = [
     ('12" Layflat',           'Layflat',        'mile', 'hose_ft',   True,  True,  True,  13),
     ('14" Layflat',           'Layflat',        'mile', 'hose_ft',   True,  True,  True,  14),
     ('16" Layflat',           'Layflat',        'mile', 'hose_ft',   True,  True,  True,  15),
+    # ── Customer-owned hose (setup/demob only — no day rate) ────────────
+    ('6" Cust Hose',           'Customer Hose',  'mile', 'hose_ft',   True,  False, True,  16),
+    ('8" Cust Hose',           'Customer Hose',  'mile', 'hose_ft',   True,  False, True,  17),
+    ('10" Cust Hose',          'Customer Hose',  'mile', 'hose_ft',   True,  False, True,  18),
+    ('12" Cust Hose',          'Customer Hose',  'mile', 'hose_ft',   True,  False, True,  19),
+    ('14" Cust Hose',          'Customer Hose',  'mile', 'hose_ft',   True,  False, True,  19),
+    ('16" Cust Hose',          'Customer Hose',  'mile', 'hose_ft',   True,  False, True,  19),
     # ── Alum/Steel Pipe (per ft, same qty setup/day/demob) ────────────────
     ('Alum/Steel Pipe',       'Pipe',           'ft',   'equipment', True,  True,  True,  20),
     # ── Pumps (setup/day/demob each have own rate) ────────────────────────
