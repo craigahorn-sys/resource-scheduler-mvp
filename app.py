@@ -2852,19 +2852,19 @@ def render_bidding_tab(engine):
                         d_val = float(row["day_rate"])   if not pd.isna(row["day_rate"])   else None
                         m_val = float(row["demob_rate"]) if not pd.isna(row["demob_rate"]) else None
 
-                        s_inp = c2.number_input("", value=float(s_val) if s_val else 0.0,
+                        s_inp = c2.number_input(" ", value=float(s_val) if s_val else 0.0,
                             min_value=0.0, step=0.01, format="%.2f",
                             key=f"{ikey}_s",
                             disabled=not _has_s,
                             label_visibility="collapsed")
 
-                        d_inp = c3.number_input("", value=float(d_val) if d_val else 0.0,
+                        d_inp = c3.number_input(" ", value=float(d_val) if d_val else 0.0,
                             min_value=0.0, step=0.01, format="%.2f",
                             key=f"{ikey}_d",
                             disabled=not _has_d,
                             label_visibility="collapsed")
 
-                        m_inp = c4.number_input("", value=float(m_val) if m_val else 0.0,
+                        m_inp = c4.number_input(" ", value=float(m_val) if m_val else 0.0,
                             min_value=0.0, step=0.01, format="%.2f",
                             key=f"{ikey}_m",
                             disabled=not _has_m,
