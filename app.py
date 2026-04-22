@@ -3629,16 +3629,21 @@ with tab_history:
 
         active_bill = pd.DataFrame()
         if not bill_df.empty:
-            bill_df["start_date"] = pd.to_datetime(bill_df["start_date"], errors="coerce").dt.date
-            bill_df["end_date"]   = pd.to_datetime(bill_df["end_date"],   errors="coerce").dt.date
+            bill_df["start_date"] = pd.to_datetime(bill_df["start_date"], errors="coerce")
+            bill_df["end_date"]   = pd.to_datetime(bill_df["end_date"],   errors="coerce")
+            # Convert act_date to Timestamp for comparison with datetime64 columns
+            act_date_ts = pd.Timestamp(act_date)
             # Items with dates that cover act_date, OR items with no dates (lump charges)
             mask_dated = (
                 bill_df["start_date"].notna() &
-                (bill_df["start_date"] <= act_date) &
-                (bill_df["end_date"]   >= act_date)
+                (bill_df["start_date"] <= act_date_ts) &
+                (bill_df["end_date"]   >= act_date_ts)
             )
             mask_undated = bill_df["start_date"].isna()
             active_bill = bill_df[mask_dated | mask_undated].copy()
+            # Convert back to date for display
+            active_bill["start_date"] = active_bill["start_date"].dt.date
+            active_bill["end_date"]   = active_bill["end_date"].dt.date
 
         st.markdown(f"**Active as of {act_date.strftime('%m/%d/%Y')}**")
 
