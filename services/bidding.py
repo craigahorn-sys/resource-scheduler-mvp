@@ -74,8 +74,8 @@ BID_CATALOG = [
     # ── Consumables (estimated daily qty) ─────────────────────────────────
     ('Filter Socks',          'Consumable',     'unit', 'consumable',False, True,  False, 150),
     # ── Per diem / lodging ────────────────────────────────────────────────
-    ('Per Diem',              'Labor',          'person','perdiem',  False, True,  False, 160),
-    ('Lodging',               'Labor',          'person','perdiem',  False, True,  False, 161),
+    ('Per Diem',              'Labor',          'person','labor',    False, True,  False, 160),
+    ('Lodging',               'Labor',          'person','labor',    False, True,  False, 161),
 ]
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -223,6 +223,13 @@ OXY_RATES = {
 }
 
 CROWHEART_RATES = {
+    # Customer-owned hose
+    '6" Cust Hose':           (None,   None,  0.35),
+    '8" Cust Hose':           (None,   None,  0.40),
+    '10" Cust Hose':          (0.40,   None,  0.45),
+    '12" Cust Hose':          (0.45,   None,  0.50),
+    '14" Cust Hose':          (0.50,   None,  None),
+    '16" Cust Hose':          (0.55,   None,  None),
     '10" Layflat':            (0.40,  0.08,  0.45),
     '12" Layflat':            (0.45,  0.12,  0.50),
     '14" Layflat':            (0.50,  0.16,  None),
@@ -389,27 +396,29 @@ def migrate_bidding(engine):
                 "sort_order": sort_order,
             })
 
-    # Seed rate cards for known customers
-    with engine.begin() as conn:
-        # Fetch catalog id lookup
-        rows = conn.execute(text("SELECT id, name FROM bid_catalog")).fetchall()
-        item_ids = {row[1]: row[0] for row in rows}
+    # Seed rate cards — one transaction per customer to avoid startup deadlocks
+    with engine.connect() as conn_lookup:
+        rows = conn_lookup.execute(text("SELECT id, name FROM bid_catalog")).fetchall()
+    item_ids = {row[1]: row[0] for row in rows}
 
-        for customer, rates in SEED_CUSTOMERS.items():
-            # Ensure every catalog item exists for this customer (NULL rates)
-            for item_name, item_id in item_ids.items():
-                s, d, m = rates.get(item_name, (None, None, None))
-                conn.execute(text("""
-                    INSERT INTO customer_rate_cards
-                        (customer_name, item_id, setup_rate, day_rate, demob_rate)
-                    VALUES (:cust, :item_id, :s, :d, :m)
-                    ON CONFLICT (customer_name, item_id) DO UPDATE SET
-                        setup_rate = EXCLUDED.setup_rate,
-                        day_rate   = EXCLUDED.day_rate,
-                        demob_rate = EXCLUDED.demob_rate,
-                        updated_at = CURRENT_TIMESTAMP
-                """), {"cust": customer, "item_id": item_id,
-                       "s": s, "d": d, "m": m})
+    for customer, rates in SEED_CUSTOMERS.items():
+        try:
+            with engine.begin() as conn:
+                for item_name, item_id in item_ids.items():
+                    s, d, m = rates.get(item_name, (None, None, None))
+                    conn.execute(text("""
+                        INSERT INTO customer_rate_cards
+                            (customer_name, item_id, setup_rate, day_rate, demob_rate)
+                        VALUES (:cust, :item_id, :s, :d, :m)
+                        ON CONFLICT (customer_name, item_id) DO UPDATE SET
+                            setup_rate = EXCLUDED.setup_rate,
+                            day_rate   = EXCLUDED.day_rate,
+                            demob_rate = EXCLUDED.demob_rate,
+                            updated_at = CURRENT_TIMESTAMP
+                    """), {"cust": customer, "item_id": item_id,
+                           "s": s, "d": d, "m": m})
+        except Exception:
+            pass
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -540,6 +549,7 @@ def save_bid(engine, data: dict) -> int:
                 setup_override=:setup_override,
                 demob_override=:demob_override,
                 per_bbl_override=:per_bbl_override,
+                job_id=:job_id,
                 notes=:notes,
                 updated_at=CURRENT_TIMESTAMP
             WHERE id=:id
@@ -553,13 +563,13 @@ def save_bid(engine, data: dict) -> int:
                      bid_days, total_bbls, hrs_per_shift,
                      labor_general, labor_lead, labor_supervisor, trucks,
                      day_rate_override, setup_override, demob_override,
-                     per_bbl_override, notes)
+                     per_bbl_override, job_id, notes)
                 VALUES
                     (:bid_name, :customer, :rate_card, :region_code, :billing_type, :status,
                      :bid_days, :total_bbls, :hrs_per_shift,
                      :labor_general, :labor_lead, :labor_supervisor, :trucks,
                      :day_rate_override, :setup_override, :demob_override,
-                     :per_bbl_override, :notes)
+                     :per_bbl_override, :job_id, :notes)
                 RETURNING id
             """), data).fetchone()
             return row[0]
@@ -626,11 +636,10 @@ def calc_bid(bid: pd.Series, items: pd.DataFrame) -> dict:
                 qty_ft = n_lead
             elif "Supervisor" in name:
                 qty_ft = n_super
+            elif "Per Diem" in name or "Lodging" in name:
+                qty_ft = n_general + n_lead + n_super
             else:
                 qty_ft = raw_qty
-        elif qty_source == "perdiem":
-            # Per diem / lodging — total headcount × bid_days (flat daily rate)
-            qty_ft = n_general + n_lead + n_super
         elif qty_source == "trucks":
             qty_ft = n_trucks
         else:
@@ -670,16 +679,7 @@ def calc_bid(bid: pd.Series, items: pd.DataFrame) -> dict:
                     setup_lines.append(line)
 
         if row["has_day_rate"] and d_rate:
-            if qty_source == "perdiem":
-                # Per diem / lodging: flat daily rate × headcount
-                # bid_days multiplier applied at job_cost level (day_total × bid_days)
-                headcount = n_general + n_lead + n_super
-                day_lines.append({
-                    "name": name, "qty": headcount, "unit": "person",
-                    "rate": d_rate, "calc_qty": headcount,
-                    "total": d_rate * headcount,
-                })
-            elif qty_source == "labor" and "Labor" in row["category"]:
+            if qty_source == "labor" and "Labor" in row["category"]:
                 # Labor day rate = qty × hrs × hourly_rate
                 total_rate = d_rate * hrs * qty_ft
                 day_lines.append({
