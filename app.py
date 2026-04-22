@@ -2943,7 +2943,7 @@ def render_bidding_tab(engine):
 
         # ── Select existing bid or create new ─────────────────────────────
         col_mode, col_sel = st.columns([1, 2])
-        mode = col_mode.radio("", ["New Bid", "Edit Existing"],
+        mode = col_mode.radio(" ", ["New Bid", "Edit Existing"],
                               key="bb_mode", horizontal=True)
 
         if mode == "Edit Existing" and not all_bids.empty:
@@ -3237,25 +3237,25 @@ def render_bidding_tab(engine):
                     r1.write(f"{item['name']}  *({unit_label})*")
 
                     qty = r2.number_input(
-                        "", min_value=0.0, step=0.1 if item["qty_source"]=="hose_ft" else 1.0,
+                        " ", min_value=0.0, step=0.1 if item["qty_source"]=="hose_ft" else 1.0,
                         value=item_qty_map.get(iid, 0.0),
                         key=f"{ikey}_qty", label_visibility="collapsed",
                         format="%.2f" if item["qty_source"]=="hose_ft" else "%.0f",
                     )
                     s_ov = r3.number_input(
-                        "", min_value=0.0, step=0.01,
+                        " ", min_value=0.0, step=0.01,
                         value=float(ovr.get("s") or 0),
                         key=f"{ikey}_sov", label_visibility="collapsed",
                         disabled=not item["has_setup"], format="%.2f",
                     )
                     d_ov = r4.number_input(
-                        "", min_value=0.0, step=0.01,
+                        " ", min_value=0.0, step=0.01,
                         value=float(ovr.get("d") or 0),
                         key=f"{ikey}_dov", label_visibility="collapsed",
                         disabled=not item["has_day_rate"], format="%.2f",
                     )
                     m_ov = r5.number_input(
-                        "", min_value=0.0, step=0.01,
+                        " ", min_value=0.0, step=0.01,
                         value=float(ovr.get("m") or 0),
                         key=f"{ikey}_mov", label_visibility="collapsed",
                         disabled=not item["has_demob"], format="%.2f",
