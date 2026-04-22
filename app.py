@@ -2831,20 +2831,25 @@ def render_bidding_tab(engine):
 
             rc_df = get_rate_card(engine, selected_cust)
 
+            # Collect all inputs across categories for the Save All button
+            if st.button(f"💾 Save All Categories", key=f"rc_save_all_{selected_cust}",
+                         type="primary"):
+                st.session_state[f"rc_save_all_triggered_{selected_cust}"] = True
+
             for cat in rc_df["category"].unique().tolist():
                 cat_df = rc_df[rc_df["category"] == cat].reset_index(drop=True)
                 with st.expander(f"**{cat}**  ({len(cat_df)} items)", expanded=False):
-                    h1, h2, h3, h4, h5 = st.columns([3, 1.2, 1.2, 1.2, 1.2])
+                    h1, h2, h3, h4 = st.columns([3, 1.2, 1.2, 1.2])
                     h1.markdown("**Item**"); h2.markdown("**Setup**")
                     h3.markdown("**Day Rate**"); h4.markdown("**Demob**")
-                    h5.markdown("**Save**")
+
+                    cat_inputs = []  # collect all row inputs for bulk save
 
                     for _, row in cat_df.iterrows():
-                        c1, c2, c3, c4, c5 = st.columns([3, 1.2, 1.2, 1.2, 1.2])
+                        c1, c2, c3, c4 = st.columns([3, 1.2, 1.2, 1.2])
                         ikey = f"rc_{selected_cust}_{row['item_id']}"
                         c1.write(row["name"])
 
-                        # SQL NULLs come back as float NaN in pandas — use pd.isna()
                         _has_s = bool(row["has_setup"])
                         _has_d = bool(row["has_day_rate"])
                         _has_m = bool(row["has_demob"])
@@ -2870,15 +2875,28 @@ def render_bidding_tab(engine):
                             disabled=not _has_m,
                             label_visibility="collapsed")
 
-                        if c5.button("💾", key=f"{ikey}_save"):
+                        cat_inputs.append({
+                            "item_id": int(row["item_id"]),
+                            "has_s": _has_s, "has_d": _has_d, "has_m": _has_m,
+                            "s": s_inp, "d": d_inp, "m": m_inp,
+                        })
+
+                    save_all = st.session_state.get(f"rc_save_all_triggered_{selected_cust}", False)
+                    if st.button(f"💾 Save {cat}", key=f"rc_save_{selected_cust}_{cat}") or save_all:
+                        for r in cat_inputs:
                             upsert_rate_card_row(
-                                engine, selected_cust, int(row["item_id"]),
-                                s_inp if _has_s else None,
-                                d_inp if _has_d else None,
-                                m_inp if _has_m else None,
+                                engine, selected_cust, r["item_id"],
+                                r["s"] if r["has_s"] else None,
+                                r["d"] if r["has_d"] else None,
+                                r["m"] if r["has_m"] else None,
                             )
-                            st.success(f"Saved {row['name']}", icon="✅")
+                        if not save_all:
+                            st.success(f"✅ Saved {cat} rates for {selected_cust}.")
                             st.rerun()
+
+            if st.session_state.pop(f"rc_save_all_triggered_{selected_cust}", False):
+                st.success(f"✅ All rates saved for {selected_cust}.")
+                st.rerun()
 
     # ═════════════════════════════════════════════════════════════════════════
     # BIDS LIST TAB
