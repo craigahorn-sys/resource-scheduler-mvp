@@ -3367,19 +3367,26 @@ def render_bidding_tab(engine):
             calc_per_bbl = eff_job_cost / calc["total_bbls"] if calc["total_bbls"] > 0 else None
             eff_per_bbl  = ov_per_bbl if ov_per_bbl > 0 else calc_per_bbl
 
+            # Guard against NaN from items with no rates yet
+            import math as _math
+            def _m(v):
+                if v is None or (isinstance(v, float) and _math.isnan(v)):
+                    return "$0.00"
+                return MONEY.format(v)
+
             # ── Summary metrics ───────────────────────────────────────────
             st.markdown("**Bid Totals**")
             m1, m2, m3, m4, m5 = st.columns(5)
             m1.metric("Setup",
-                      MONEY.format(eff_setup),
-                      delta=MONEY.format(eff_setup - calc["setup_total"]) if ov_setup > 0 else None)
+                      _m(eff_setup),
+                      delta=_m(eff_setup - calc["setup_total"]) if ov_setup > 0 else None)
             m2.metric("Day Rate/Day",
-                      MONEY.format(eff_day_rate),
-                      delta=MONEY.format(eff_day_rate - calc["day_total"]) if ov_day > 0 else None)
+                      _m(eff_day_rate),
+                      delta=_m(eff_day_rate - calc["day_total"]) if ov_day > 0 else None)
             m3.metric("Demob",
-                      MONEY.format(eff_demob),
-                      delta=MONEY.format(eff_demob - calc["demob_total"]) if ov_demob > 0 else None)
-            m4.metric(f"Total ({calc['bid_days']}d)", MONEY.format(eff_job_cost))
+                      _m(eff_demob),
+                      delta=_m(eff_demob - calc["demob_total"]) if ov_demob > 0 else None)
+            m4.metric(f"Total ({calc['bid_days']}d)", _m(eff_job_cost))
             if eff_per_bbl:
                 m5.metric("Cost / BBL",
                           f"${eff_per_bbl:.5f}",
