@@ -2956,14 +2956,60 @@ def render_bidding_tab(engine):
                 key="bb_existing_bid",
             )
             existing = get_bid(engine, sel_bid_id)
-            # Clear widget cache when bid changes so values reload from DB
+            # When bid changes, write values directly into session state
+            # so widgets pick them up immediately on next render
             last_loaded = st.session_state.get("bb_last_loaded_bid_id")
-            if last_loaded != sel_bid_id:
-                for k in ["bb_customer", "bb_rate_card", "bb_job_name",
-                           "bb_status", "bb_billing_type", "bb_bid_days",
-                           "bb_total_bbls", "bb_hrs_shift", "bb_labor_gen",
-                           "bb_labor_lead", "bb_labor_sup", "bb_trucks"]:
-                    st.session_state.pop(k, None)
+            if last_loaded != sel_bid_id and existing is not None:
+                from services.bidding import get_customers_with_rate_cards as _get_rc
+                _rc_names = _get_rc(engine)
+
+                # Customer
+                st.session_state["bb_customer"] = str(existing.get("customer") or "")
+
+                # Rate card — use stored rate_card, fall back to matching customer name
+                _stored_rc = str(existing.get("rate_card") or "")
+                if not _stored_rc and st.session_state["bb_customer"] in _rc_names:
+                    _stored_rc = st.session_state["bb_customer"]
+                st.session_state["bb_rate_card"] = _stored_rc if _stored_rc in _rc_names else (_rc_names[0] if _rc_names else "Standard")
+
+                # Status
+                _status_opts = ["Draft", "Sent", "Won", "Lost", "Expired"]
+                _status = str(existing.get("status") or "Draft")
+                st.session_state["bb_status"] = _status if _status in _status_opts else "Draft"
+
+                # Billing type
+                _bt_opts = ["line_item", "day_rate", "per_bbl"]
+                _bt = str(existing.get("billing_type") or "line_item")
+                st.session_state["bb_billing_type"] = _bt if _bt in _bt_opts else "line_item"
+
+                # Numeric fields
+                st.session_state["bb_bid_days"]   = int(existing.get("bid_days") or 0)
+                st.session_state["bb_total_bbls"]  = float(existing.get("total_bbls") or 0.0)
+                st.session_state["bb_hrs_shift"]   = float(existing.get("hrs_per_shift") or 14.0)
+                st.session_state["bb_labor_gen"]   = int(existing.get("labor_general") or 0)
+                st.session_state["bb_labor_lead"]  = int(existing.get("labor_lead") or 0)
+                st.session_state["bb_labor_sup"]   = int(existing.get("labor_supervisor") or 0)
+                st.session_state["bb_trucks"]      = int(existing.get("trucks") or 0)
+
+                # Job Name — find matching label
+                from services.db import query_df as _qdf
+                from sqlalchemy import text as _text
+                _jobs = _qdf(engine, "SELECT id, job_code, job_name, customer FROM jobs ORDER BY job_code")
+                _job_opts = ["(New — not linked to a job)"] + (
+                    [f"{r['job_code']} — {r['job_name']} ({r['customer'] or ''})".strip(" ()")
+                     for _, r in _jobs.iterrows()] if not _jobs.empty else []
+                )
+                _jid = existing.get("job_id")
+                _job_label = "(New — not linked to a job)"
+                if _jid is not None and not pd.isna(_jid) and not _jobs.empty:
+                    _jm = _jobs[_jobs["id"] == int(_jid)]
+                    if not _jm.empty:
+                        r = _jm.iloc[0]
+                        _lbl = f"{r['job_code']} — {r['job_name']} ({r['customer'] or ''})".strip(" ()")
+                        if _lbl in _job_opts:
+                            _job_label = _lbl
+                st.session_state["bb_job_name"] = _job_label
+
                 st.session_state["bb_last_loaded_bid_id"] = sel_bid_id
                 st.rerun()
         else:
