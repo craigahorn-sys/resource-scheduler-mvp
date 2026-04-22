@@ -2591,7 +2591,7 @@ with tab_revenue:
                 "Start":       st.column_config.DateColumn("Start", format="MM/DD/YYYY", width="medium"),
                 "End":         st.column_config.DateColumn("End",   format="MM/DD/YYYY", width="medium"),
                 "Invoice Qty": st.column_config.NumberColumn("Invoice Qty", format="%.2f", width="small"),
-                "Unit Price":  st.column_config.NumberColumn("Unit Price ($)", format="%.4f", width="medium"),
+                "Unit Price":  st.column_config.NumberColumn("Unit Price ($)", format="%.2f", width="medium"),
                 "Line Total":  st.column_config.NumberColumn("Line Total ($)", format="%.2f", width="medium"),
                 "Notes":       st.column_config.TextColumn("Notes", width="medium"),
             },
@@ -2831,25 +2831,20 @@ def render_bidding_tab(engine):
 
             rc_df = get_rate_card(engine, selected_cust)
 
-            # Collect all inputs across categories for the Save All button
-            if st.button(f"💾 Save All Categories", key=f"rc_save_all_{selected_cust}",
-                         type="primary"):
-                st.session_state[f"rc_save_all_triggered_{selected_cust}"] = True
-
             for cat in rc_df["category"].unique().tolist():
                 cat_df = rc_df[rc_df["category"] == cat].reset_index(drop=True)
                 with st.expander(f"**{cat}**  ({len(cat_df)} items)", expanded=False):
-                    h1, h2, h3, h4 = st.columns([3, 1.2, 1.2, 1.2])
+                    h1, h2, h3, h4, h5 = st.columns([3, 1.2, 1.2, 1.2, 1.2])
                     h1.markdown("**Item**"); h2.markdown("**Setup**")
                     h3.markdown("**Day Rate**"); h4.markdown("**Demob**")
-
-                    cat_inputs = []  # collect all row inputs for bulk save
+                    h5.markdown("**Save**")
 
                     for _, row in cat_df.iterrows():
-                        c1, c2, c3, c4 = st.columns([3, 1.2, 1.2, 1.2])
+                        c1, c2, c3, c4, c5 = st.columns([3, 1.2, 1.2, 1.2, 1.2])
                         ikey = f"rc_{selected_cust}_{row['item_id']}"
                         c1.write(row["name"])
 
+                        # SQL NULLs come back as float NaN in pandas — use pd.isna()
                         _has_s = bool(row["has_setup"])
                         _has_d = bool(row["has_day_rate"])
                         _has_m = bool(row["has_demob"])
@@ -2875,28 +2870,15 @@ def render_bidding_tab(engine):
                             disabled=not _has_m,
                             label_visibility="collapsed")
 
-                        cat_inputs.append({
-                            "item_id": int(row["item_id"]),
-                            "has_s": _has_s, "has_d": _has_d, "has_m": _has_m,
-                            "s": s_inp, "d": d_inp, "m": m_inp,
-                        })
-
-                    save_all = st.session_state.get(f"rc_save_all_triggered_{selected_cust}", False)
-                    if st.button(f"💾 Save {cat}", key=f"rc_save_{selected_cust}_{cat}") or save_all:
-                        for r in cat_inputs:
+                        if c5.button("💾", key=f"{ikey}_save"):
                             upsert_rate_card_row(
-                                engine, selected_cust, r["item_id"],
-                                r["s"] if r["has_s"] else None,
-                                r["d"] if r["has_d"] else None,
-                                r["m"] if r["has_m"] else None,
+                                engine, selected_cust, int(row["item_id"]),
+                                s_inp if _has_s else None,
+                                d_inp if _has_d else None,
+                                m_inp if _has_m else None,
                             )
-                        if not save_all:
-                            st.success(f"✅ Saved {cat} rates for {selected_cust}.")
+                            st.success(f"Saved {row['name']}", icon="✅")
                             st.rerun()
-
-            if st.session_state.pop(f"rc_save_all_triggered_{selected_cust}", False):
-                st.success(f"✅ All rates saved for {selected_cust}.")
-                st.rerun()
 
     # ═════════════════════════════════════════════════════════════════════════
     # BIDS LIST TAB
@@ -3005,7 +2987,8 @@ def render_bidding_tab(engine):
 
                 # Numeric fields
                 st.session_state["bb_bid_days"]   = int(existing.get("bid_days") or 0)
-                st.session_state["bb_total_bbls"]  = float(existing.get("total_bbls") or 0.0)
+                _bbls_v = int(existing.get("total_bbls") or 0)
+                st.session_state["bb_total_bbls"] = f"{_bbls_v:,}" if _bbls_v else ""
                 st.session_state["bb_hrs_shift"]   = float(existing.get("hrs_per_shift") or 14.0)
                 st.session_state["bb_labor_gen"]   = int(existing.get("labor_general") or 0)
                 st.session_state["bb_labor_lead"]  = int(existing.get("labor_lead") or 0)
@@ -3128,11 +3111,17 @@ def render_bidding_tab(engine):
             value=int(existing["bid_days"] or 0) if existing is not None else 0,
             key="bb_bid_days",
         )
-        total_bbls = hf6.number_input(
-            "Total BBLs (for Per BBL billing)", min_value=0.0, step=1000.0,
-            value=float(existing["total_bbls"] or 0) if existing is not None else 0.0,
+        _bbls_stored = int(existing["total_bbls"] or 0) if existing is not None else 0
+        _bbls_str = hf6.text_input(
+            "Total BBLs (for Per BBL billing)",
+            value=f"{_bbls_stored:,}" if _bbls_stored else "",
+            placeholder="e.g. 1,500,000",
             key="bb_total_bbls",
         )
+        try:
+            total_bbls = float(str(_bbls_str).replace(",", "").strip()) if _bbls_str.strip() else 0.0
+        except Exception:
+            total_bbls = 0.0
 
         # ── Crew / shift parameters ───────────────────────────────────────
         st.markdown("##### Crew & Shift Parameters")
@@ -3257,19 +3246,19 @@ def render_bidding_tab(engine):
                         "", min_value=0.0, step=0.01,
                         value=float(ovr.get("s") or 0),
                         key=f"{ikey}_sov", label_visibility="collapsed",
-                        disabled=not item["has_setup"], format="%.4f",
+                        disabled=not item["has_setup"], format="%.2f",
                     )
                     d_ov = r4.number_input(
                         "", min_value=0.0, step=0.01,
                         value=float(ovr.get("d") or 0),
                         key=f"{ikey}_dov", label_visibility="collapsed",
-                        disabled=not item["has_day_rate"], format="%.4f",
+                        disabled=not item["has_day_rate"], format="%.2f",
                     )
                     m_ov = r5.number_input(
                         "", min_value=0.0, step=0.01,
                         value=float(ovr.get("m") or 0),
                         key=f"{ikey}_mov", label_visibility="collapsed",
-                        disabled=not item["has_demob"], format="%.4f",
+                        disabled=not item["has_demob"], format="%.2f",
                     )
                     updated_items[iid] = {
                         "qty": qty,
@@ -3312,34 +3301,55 @@ def render_bidding_tab(engine):
             st.markdown("**Price Overrides** — leave at 0 to use calculated value")
             ov1, ov2, ov3, ov4 = st.columns(4)
 
-            ov_setup = ov1.number_input(
-                "Setup Override ($)",
-                min_value=0.0, step=25.0, format="%.2f",
-                value=float(bid_obj.get("setup_override") or 0),
+            def _ov_val(key):
+                """Parse override text input — blank or 0 means use calculated."""
+                raw = st.session_state.get(key, "")
+                try:
+                    v = float(str(raw).replace(",", "").strip())
+                    return v if v > 0 else 0.0
+                except Exception:
+                    return 0.0
+
+            _setup_stored = float(bid_obj.get("setup_override") or 0)
+            _day_stored   = float(bid_obj.get("day_rate_override") or 0)
+            _demob_stored = float(bid_obj.get("demob_override") or 0)
+            _perbbl_stored= float(bid_obj.get("per_bbl_override") or 0)
+
+            ov1.markdown(f"**Setup Override ($)**  ")
+            ov1.caption(f"Calculated: {_m(calc['setup_total'])}")
+            _ov_setup_str = ov1.text_input("",
+                value=str(int(_setup_stored)) if _setup_stored else "",
+                placeholder="0  (use calculated)",
                 key="bb_ov_setup",
-                help=f"Calculated: {MONEY.format(calc['setup_total'])}",
-            )
-            ov_day = ov2.number_input(
-                "Day Rate Override ($/day)",
-                min_value=0.0, step=25.0, format="%.2f",
-                value=float(bid_obj.get("day_rate_override") or 0),
+                label_visibility="collapsed")
+            ov_setup = _ov_val("bb_ov_setup") if _ov_setup_str.strip() else 0.0
+
+            ov2.markdown(f"**Day Rate Override ($/day)**  ")
+            ov2.caption(f"Calculated: {_m(calc['day_total'])}/day")
+            _ov_day_str = ov2.text_input("",
+                value=str(int(_day_stored)) if _day_stored else "",
+                placeholder="0  (use calculated)",
                 key="bb_ov_day",
-                help=f"Calculated: {MONEY.format(calc['day_total'])}/day",
-            )
-            ov_demob = ov3.number_input(
-                "Demob Override ($)",
-                min_value=0.0, step=25.0, format="%.2f",
-                value=float(bid_obj.get("demob_override") or 0),
+                label_visibility="collapsed")
+            ov_day = _ov_val("bb_ov_day") if _ov_day_str.strip() else 0.0
+
+            ov3.markdown(f"**Demob Override ($)**  ")
+            ov3.caption(f"Calculated: {_m(calc['demob_total'])}")
+            _ov_demob_str = ov3.text_input("",
+                value=str(int(_demob_stored)) if _demob_stored else "",
+                placeholder="0  (use calculated)",
                 key="bb_ov_demob",
-                help=f"Calculated: {MONEY.format(calc['demob_total'])}",
-            )
-            ov_per_bbl = ov4.number_input(
-                "Per BBL Override ($/BBL)",
-                min_value=0.0, step=0.001, format="%.5f",
-                value=float(bid_obj.get("per_bbl_override") or 0),
+                label_visibility="collapsed")
+            ov_demob = _ov_val("bb_ov_demob") if _ov_demob_str.strip() else 0.0
+
+            ov4.markdown(f"**Per BBL Override ($/BBL)**  ")
+            ov4.caption("Calculated after other overrides")
+            _ov_perbbl_str = ov4.text_input("",
+                value=f"{_perbbl_stored:.4f}" if _perbbl_stored else "",
+                placeholder="0.0000  (use calculated)",
                 key="bb_ov_per_bbl",
-                help="Calculated after other overrides are applied",
-            )
+                label_visibility="collapsed")
+            ov_per_bbl = _ov_val("bb_ov_per_bbl") if _ov_perbbl_str.strip() else 0.0
 
             if st.button("💾 Save Price Overrides", key="bb_save_overrides"):
                 execute(engine, """
@@ -3367,26 +3377,19 @@ def render_bidding_tab(engine):
             calc_per_bbl = eff_job_cost / calc["total_bbls"] if calc["total_bbls"] > 0 else None
             eff_per_bbl  = ov_per_bbl if ov_per_bbl > 0 else calc_per_bbl
 
-            # Guard against NaN from items with no rates yet
-            import math as _math
-            def _m(v):
-                if v is None or (isinstance(v, float) and _math.isnan(v)):
-                    return "$0.00"
-                return MONEY.format(v)
-
             # ── Summary metrics ───────────────────────────────────────────
             st.markdown("**Bid Totals**")
             m1, m2, m3, m4, m5 = st.columns(5)
             m1.metric("Setup",
-                      _m(eff_setup),
-                      delta=_m(eff_setup - calc["setup_total"]) if ov_setup > 0 else None)
+                      MONEY.format(eff_setup),
+                      delta=MONEY.format(eff_setup - calc["setup_total"]) if ov_setup > 0 else None)
             m2.metric("Day Rate/Day",
-                      _m(eff_day_rate),
-                      delta=_m(eff_day_rate - calc["day_total"]) if ov_day > 0 else None)
+                      MONEY.format(eff_day_rate),
+                      delta=MONEY.format(eff_day_rate - calc["day_total"]) if ov_day > 0 else None)
             m3.metric("Demob",
-                      _m(eff_demob),
-                      delta=_m(eff_demob - calc["demob_total"]) if ov_demob > 0 else None)
-            m4.metric(f"Total ({calc['bid_days']}d)", _m(eff_job_cost))
+                      MONEY.format(eff_demob),
+                      delta=MONEY.format(eff_demob - calc["demob_total"]) if ov_demob > 0 else None)
+            m4.metric(f"Total ({calc['bid_days']}d)", MONEY.format(eff_job_cost))
             if eff_per_bbl:
                 m5.metric("Cost / BBL",
                           f"${eff_per_bbl:.5f}",
@@ -3402,7 +3405,7 @@ def render_bidding_tab(engine):
                     st.markdown(f"**{label}**")
                     rows = [{"Item": l["name"],
                              "Qty": f"{l['qty']:,.2f} {l['unit']}",
-                             "Rate": f"${l['rate']:,.4f}",
+                             "Rate": f"${l['rate']:,.4f}" if l['rate'] < 10 else f"${l['rate']:,.2f}",
                              "Total": MONEY.format(l["total"])}
                             for l in lines]
                     st.dataframe(pd.DataFrame(rows), hide_index=True,
