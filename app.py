@@ -3480,10 +3480,14 @@ def render_bidding_tab(engine):
                             bid_obj, calc, convert_billing)
                         save_line_items(engine, int(target_job), job_lines)
                         from services.db import execute as db_execute
+                        # Update job billing_type to match bid and link job_id
+                        db_execute(engine,
+                            "UPDATE jobs SET billing_type=:bt WHERE id=:jid",
+                            {"bt": convert_billing, "jid": int(target_job)})
                         db_execute(engine,
                             "UPDATE bids SET job_id=:jid WHERE id=:bid_id",
                             {"jid": int(target_job), "bid_id": active_bid_id})
-                        st.success(f"✅ {len(job_lines)} line items pushed to job.")
+                        st.success(f"✅ {len(job_lines)} line items pushed to job with {BILLING_LABELS[convert_billing]} billing.")
                         st.rerun()
 
                 st.caption(
