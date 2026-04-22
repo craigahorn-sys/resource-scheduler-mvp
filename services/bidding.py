@@ -680,13 +680,22 @@ def calc_bid(bid: pd.Series, items: pd.DataFrame) -> dict:
 
         if row["has_day_rate"] and d_rate:
             if qty_source == "labor" and "Labor" in row["category"]:
-                # Labor day rate = qty × hrs × hourly_rate
-                total_rate = d_rate * hrs * qty_ft
-                day_lines.append({
-                    "name": name, "qty": qty_ft, "unit": "person",
-                    "rate": d_rate, "calc_qty": qty_ft * hrs,
-                    "total": total_rate,
-                })
+                if name in ("Per Diem", "Lodging"):
+                    # Flat daily rate per person — no hrs multiplier
+                    # bid_days applied at job_cost level (day_total × bid_days)
+                    day_lines.append({
+                        "name": name, "qty": qty_ft, "unit": "person",
+                        "rate": d_rate, "calc_qty": qty_ft,
+                        "total": d_rate * qty_ft,
+                    })
+                else:
+                    # Labor day rate = headcount × hrs × hourly_rate
+                    total_rate = d_rate * hrs * qty_ft
+                    day_lines.append({
+                        "name": name, "qty": qty_ft, "unit": "person",
+                        "rate": d_rate, "calc_qty": qty_ft * hrs,
+                        "total": total_rate,
+                    })
             else:
                 line = _line(d_rate, qty_ft, unit)
                 if line:
