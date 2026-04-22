@@ -2661,8 +2661,8 @@ with tab_revenue:
                 "Job Code":    j["job_code"],
                 "Job Name":    j["job_name"],
                 "Customer":    str(j.get("customer", "") or "—"),
-                "Co. Man":     str(j.get("ordered_by",  "") or "—"),
-                "Invoice #":   str(j.get("invoice_number", "") or "—"),
+                "Co. Man":     "—" if (j.get("ordered_by") is None or (hasattr(j.get("ordered_by"), '__float__') and pd.isna(j.get("ordered_by")))) else (str(j.get("ordered_by")) or "—"),
+                "Invoice #":   "—" if (j.get("invoice_number") is None or (hasattr(j.get("invoice_number"), '__float__') and pd.isna(j.get("invoice_number")))) else (str(j.get("invoice_number")) or "—"),
                 "Day Rate":    f"${float(j['day_rate']):,.2f}" if j.get("day_rate") and not pd.isna(j["day_rate"]) else "—",
                 "Job Total":   f"${jt:,.2f}",
                 "Accrue":      "✓" if j.get("accrue") else "",
@@ -3439,40 +3439,55 @@ def render_bidding_tab(engine):
                     index=list(BILLING_LABELS.keys()).index(billing_type),
                     key="bb_convert_billing",
                 )
+
                 existing_jobs = query_df(engine,
                     "SELECT id, job_code, job_name FROM jobs ORDER BY job_code")
                 job_options = existing_jobs["id"].tolist() if not existing_jobs.empty else []
 
-                if wc2.button("🔗 Push Line Items to Job", key="bb_push_lines"):
-                    if not job_options:
-                        st.warning("Create the job first in the Jobs tab.")
-                    else:
-                        target_job_id = st.session_state.get("bb_target_job_id")
-                        if target_job_id:
-                            job_lines = bid_to_job_line_items(
-                                bid_obj, calc, convert_billing)
-                            save_line_items(engine, target_job_id, job_lines)
-                            from services.db import execute as db_execute
-                            db_execute(engine,
-                                "UPDATE bids SET job_id=:jid WHERE id=:bid_id",
-                                {"jid": target_job_id,
-                                 "bid_id": active_bid_id})
-                            st.success(
-                                f"✅ {len(job_lines)} line items pushed to job.")
-                            st.rerun()
+                # Default to the job already linked to this bid
+                linked_job_id_conv = None
+                _bid_job_id = bid_obj.get("job_id")
+                if _bid_job_id is not None and not pd.isna(_bid_job_id):
+                    linked_job_id_conv = int(_bid_job_id)
+
+                default_idx = 0
+                if linked_job_id_conv and linked_job_id_conv in job_options:
+                    default_idx = job_options.index(linked_job_id_conv)
 
                 target_job = st.selectbox(
-                    "Target job", job_options,
+                    "Target job",
+                    job_options,
+                    index=default_idx,
                     format_func=lambda x: (
                         f"{existing_jobs.loc[existing_jobs['id']==x,'job_code'].values[0]} — "
                         f"{existing_jobs.loc[existing_jobs['id']==x,'job_name'].values[0]}"
                     ),
                     key="bb_target_job_id",
                 ) if job_options else None
-                st.session_state["bb_target_job_id"] = target_job
+
+                if linked_job_id_conv:
+                    st.caption(
+                        f"✅ Defaulting to linked job. Change above if needed."
+                    )
+
+                if wc2.button("🔗 Push Line Items to Job", key="bb_push_lines", type="primary"):
+                    if not job_options:
+                        st.warning("Create the job first in the Jobs tab.")
+                    elif not target_job:
+                        st.warning("Select a target job above.")
+                    else:
+                        job_lines = bid_to_job_line_items(
+                            bid_obj, calc, convert_billing)
+                        save_line_items(engine, int(target_job), job_lines)
+                        from services.db import execute as db_execute
+                        db_execute(engine,
+                            "UPDATE bids SET job_id=:jid WHERE id=:bid_id",
+                            {"jid": int(target_job), "bid_id": active_bid_id})
+                        st.success(f"✅ {len(job_lines)} line items pushed to job.")
+                        st.rerun()
 
                 st.caption(
-                    "This will replace any existing line items on the job. "
+                    "⚠️ This will replace any existing line items on the job. "
                     "You can switch billing type here without changing the bid."
                 )
             else:
