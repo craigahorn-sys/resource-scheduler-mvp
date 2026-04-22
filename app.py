@@ -2844,40 +2844,40 @@ def render_bidding_tab(engine):
                         ikey = f"rc_{selected_cust}_{row['item_id']}"
                         c1.write(row["name"])
 
-                    # has_* from catalog — NULL from LEFT JOIN treated as True
-                    _has_s = row["has_setup"]    not in (False, 0, None) or row["setup_rate"] is not None
-                    _has_d = row["has_day_rate"] not in (False, 0, None) or row["day_rate"]   is not None
-                    _has_m = row["has_demob"]    not in (False, 0, None) or row["demob_rate"] is not None
-                    s_val = float(row["setup_rate"]) if row["setup_rate"] is not None else None
-                    d_val = float(row["day_rate"])   if row["day_rate"]   is not None else None
-                    m_val = float(row["demob_rate"]) if row["demob_rate"] is not None else None
+                        # SQL NULLs come back as float NaN in pandas — use pd.isna()
+                        _has_s = bool(row["has_setup"])
+                        _has_d = bool(row["has_day_rate"])
+                        _has_m = bool(row["has_demob"])
+                        s_val = float(row["setup_rate"]) if not pd.isna(row["setup_rate"]) else None
+                        d_val = float(row["day_rate"])   if not pd.isna(row["day_rate"])   else None
+                        m_val = float(row["demob_rate"]) if not pd.isna(row["demob_rate"]) else None
 
-                    s_inp = c2.number_input("", value=s_val or 0.0,
-                        min_value=0.0, step=0.01, format="%.4f",
-                        key=f"{ikey}_s",
-                        disabled=not _has_s,
-                        label_visibility="collapsed")
+                        s_inp = c2.number_input("", value=float(s_val) if s_val else 0.0,
+                            min_value=0.0, step=0.01, format="%.4f",
+                            key=f"{ikey}_s",
+                            disabled=not _has_s,
+                            label_visibility="collapsed")
 
-                    d_inp = c3.number_input("", value=d_val or 0.0,
-                        min_value=0.0, step=0.01, format="%.4f",
-                        key=f"{ikey}_d",
-                        disabled=not _has_d,
-                        label_visibility="collapsed")
+                        d_inp = c3.number_input("", value=float(d_val) if d_val else 0.0,
+                            min_value=0.0, step=0.01, format="%.4f",
+                            key=f"{ikey}_d",
+                            disabled=not _has_d,
+                            label_visibility="collapsed")
 
-                    m_inp = c4.number_input("", value=m_val or 0.0,
-                        min_value=0.0, step=0.01, format="%.4f",
-                        key=f"{ikey}_m",
-                        disabled=not _has_m,
-                        label_visibility="collapsed")
+                        m_inp = c4.number_input("", value=float(m_val) if m_val else 0.0,
+                            min_value=0.0, step=0.01, format="%.4f",
+                            key=f"{ikey}_m",
+                            disabled=not _has_m,
+                            label_visibility="collapsed")
 
-                    if c5.button("💾", key=f"{ikey}_save"):
-                        upsert_rate_card_row(
-                            engine, selected_cust, int(row["item_id"]),
-                            s_inp if _has_s else None,
-                            d_inp if _has_d else None,
-                            m_inp if _has_m else None,
-                        )
-                        st.success(f"Saved {row['name']}", icon="✓")
+                        if c5.button("💾", key=f"{ikey}_save"):
+                            upsert_rate_card_row(
+                                engine, selected_cust, int(row["item_id"]),
+                                s_inp if _has_s else None,
+                                d_inp if _has_d else None,
+                                m_inp if _has_m else None,
+                            )
+                            st.success(f"Saved {row['name']}", icon="✓")
                         st.rerun()
 
     # ═════════════════════════════════════════════════════════════════════════
