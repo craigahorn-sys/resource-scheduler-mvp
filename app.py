@@ -2652,8 +2652,11 @@ with tab_revenue:
                             "Qty", "Unit Price", "Line Total"]
             disp["Start"] = pd.to_datetime(disp["Start"], errors="coerce").dt.strftime("%m/%d/%Y").fillna("")
             disp["End"]   = pd.to_datetime(disp["End"],   errors="coerce").dt.strftime("%m/%d/%Y").fillna("")
-            for col in ["Qty", "Unit Price", "Line Total"]:
-                disp[col] = disp[col].apply(lambda v: f"${float(v):,.2f}" if pd.notna(v) and v != "" else "")
+            disp["Qty"] = disp["Qty"].apply(
+                lambda v: f"{float(v):,.2f}" if pd.notna(v) and v != "" else "")
+            for col in ["Unit Price", "Line Total"]:
+                disp[col] = disp[col].apply(
+                    lambda v: f"${float(v):,.2f}" if pd.notna(v) and v != "" else "")
             st.dataframe(disp, hide_index=True, use_container_width=True)
 
         st.divider()
