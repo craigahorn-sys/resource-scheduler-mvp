@@ -2461,6 +2461,16 @@ with tab_revenue:
             key=f"rev_billing_type_{selected_rev_job_id}",
         )
 
+        # Helper to safely convert DB values (handles NaN from SQL NULLs)
+        def _sf(v):
+            if v is None: return ""
+            try:
+                import math
+                if isinstance(v, float) and math.isnan(v): return ""
+            except Exception: pass
+            s = str(v).strip()
+            return "" if s in ("nan","None","NaT") else s
+
         # Row 1: Invoice / billing fields
         bf1, bf2, bf3, bf4 = st.columns([1.5, 1.5, 1.5, 0.8])
         # "Company Man" on revenue sheet = "Ordered By" on ticket — same field
@@ -2468,14 +2478,6 @@ with tab_revenue:
                                           value=_sf(sel_job.get("ordered_by")),
                                           key=f"rev_ob_{selected_rev_job_id}",
                                           help="Shown as 'Co. Man' on revenue report and 'Ordered By' on field ticket.")
-        def _sf(v):
-            if v is None: return ""
-            try:
-                import math; 
-                if isinstance(v, float) and math.isnan(v): return ""
-            except Exception: pass
-            s = str(v).strip()
-            return "" if s in ("nan","None","NaT") else s
         b_invoice_number = bf2.text_input("Invoice #",     value=_sf(sel_job.get("invoice_number")),  key=f"rev_inv_{selected_rev_job_id}")
         b_so_ticket      = bf3.text_input("SO / Ticket #", value=_sf(sel_job.get("so_ticket_number")), key=f"rev_so_{selected_rev_job_id}")
         b_accrue_raw = sel_job.get("accrue")
@@ -2487,18 +2489,18 @@ with tab_revenue:
 
         # Row 2: Field ticket fields
         tf1, tf2, tf3 = st.columns(3)
-        b_ees_supervisor = tf1.text_input("EES Supervisor", value=_sf(sel_job.get("ees_supervisor")), key=f"rev_sup_{selected_rev_job_id}")
-        b_customer_po    = tf2.text_input("Customer PO",    value=_sf(sel_job.get("customer_po")),    key=f"rev_po_{selected_rev_job_id}")
-        b_county_state   = tf3.text_input("County & State", value=_sf(sel_job.get("county_state")),   key=f"rev_cs_{selected_rev_job_id}")
+        b_ees_supervisor = tf1.text_input("EES Supervisor", value=str(sel_job.get("ees_supervisor", "") or ""), key=f"rev_sup_{selected_rev_job_id}")
+        b_customer_po    = tf2.text_input("Customer PO",    value=str(sel_job.get("customer_po",    "") or ""), key=f"rev_po_{selected_rev_job_id}")
+        b_county_state   = tf3.text_input("County & State", value=str(sel_job.get("county_state",   "") or ""), key=f"rev_cs_{selected_rev_job_id}")
 
         tf4, tf5, tf6 = st.columns(3)
-        b_well_name      = tf4.text_input("Well Name",      value=_sf(sel_job.get("well_name")),      key=f"rev_wn_{selected_rev_job_id}")
-        b_well_number    = tf5.text_input("Well Number",    value=_sf(sel_job.get("well_number")),    key=f"rev_wnr_{selected_rev_job_id}")
-        b_department     = tf6.text_input("Department",     value=_sf(sel_job.get("department")),     key=f"rev_dept_{selected_rev_job_id}")
+        b_well_name      = tf4.text_input("Well Name",      value=str(sel_job.get("well_name",      "") or ""), key=f"rev_wn_{selected_rev_job_id}")
+        b_well_number    = tf5.text_input("Well Number",    value=str(sel_job.get("well_number",    "") or ""), key=f"rev_wnr_{selected_rev_job_id}")
+        b_department     = tf6.text_input("Department",     value=str(sel_job.get("department",     "") or ""), key=f"rev_dept_{selected_rev_job_id}")
 
         b_job_description = st.text_input(
             "Job Description (appears on ticket)",
-            value=_sf(sel_job.get("job_description")),
+            value=str(sel_job.get("job_description", "") or ""),
             key=f"rev_jd_{selected_rev_job_id}",
         )
 
@@ -2650,11 +2652,8 @@ with tab_revenue:
                             "Qty", "Unit Price", "Line Total"]
             disp["Start"] = pd.to_datetime(disp["Start"], errors="coerce").dt.strftime("%m/%d/%Y").fillna("")
             disp["End"]   = pd.to_datetime(disp["End"],   errors="coerce").dt.strftime("%m/%d/%Y").fillna("")
-            disp["Qty"] = disp["Qty"].apply(
-                lambda v: f"{float(v):,.2f}" if pd.notna(v) and v != "" else "")
-            for col in ["Unit Price", "Line Total"]:
-                disp[col] = disp[col].apply(
-                    lambda v: f"${float(v):,.2f}" if pd.notna(v) and v != "" else "")
+            for col in ["Qty", "Unit Price", "Line Total"]:
+                disp[col] = disp[col].apply(lambda v: f"${float(v):,.2f}" if pd.notna(v) and v != "" else "")
             st.dataframe(disp, hide_index=True, use_container_width=True)
 
         st.divider()
@@ -3647,18 +3646,16 @@ with tab_history:
 
         active_bill = pd.DataFrame()
         if not bill_df.empty:
-            bill_df["start_date"] = pd.to_datetime(bill_df["start_date"], errors="coerce")
-            bill_df["end_date"]   = pd.to_datetime(bill_df["end_date"],   errors="coerce")
-            act_date_ts = pd.Timestamp(act_date)
+            bill_df["start_date"] = pd.to_datetime(bill_df["start_date"], errors="coerce").dt.date
+            bill_df["end_date"]   = pd.to_datetime(bill_df["end_date"],   errors="coerce").dt.date
+            # Items with dates that cover act_date, OR items with no dates (lump charges)
             mask_dated = (
                 bill_df["start_date"].notna() &
-                (bill_df["start_date"] <= act_date_ts) &
-                (bill_df["end_date"]   >= act_date_ts)
+                (bill_df["start_date"] <= act_date) &
+                (bill_df["end_date"]   >= act_date)
             )
             mask_undated = bill_df["start_date"].isna()
             active_bill = bill_df[mask_dated | mask_undated].copy()
-            active_bill["start_date"] = active_bill["start_date"].dt.date
-            active_bill["end_date"]   = active_bill["end_date"].dt.date
 
         st.markdown(f"**Active as of {act_date.strftime('%m/%d/%Y')}**")
 
