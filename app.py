@@ -2443,7 +2443,14 @@ with tab_revenue:
             "day_rate":  "Day Rate (setup + single day rate + demob)",
             "per_bbl":   "Per BBL (fixed per-barrel price)",
         }
-        existing_billing_type = str(sel_job.get("billing_type", "") or "line_item")
+        import math as _math2
+        _bt_raw = sel_job.get("billing_type")
+        existing_billing_type = (
+            "line_item" if _bt_raw is None
+            or (isinstance(_bt_raw, float) and _math2.isnan(_bt_raw))
+            or str(_bt_raw).strip() in ("", "nan", "None")
+            else str(_bt_raw).strip()
+        )
         if existing_billing_type not in BILLING_TYPE_LABELS:
             existing_billing_type = "line_item"
         b_billing_type = st.selectbox(
@@ -2461,8 +2468,16 @@ with tab_revenue:
                                           value=str(sel_job.get("ordered_by", "") or ""),
                                           key=f"rev_ob_{selected_rev_job_id}",
                                           help="Shown as 'Co. Man' on revenue report and 'Ordered By' on field ticket.")
-        b_invoice_number = bf2.text_input("Invoice #",     value=str(sel_job.get("invoice_number",  "") or ""), key=f"rev_inv_{selected_rev_job_id}")
-        b_so_ticket      = bf3.text_input("SO / Ticket #", value=str(sel_job.get("so_ticket_number","") or ""), key=f"rev_so_{selected_rev_job_id}")
+        def _sf(v):
+            if v is None: return ""
+            try:
+                import math; 
+                if isinstance(v, float) and math.isnan(v): return ""
+            except Exception: pass
+            s = str(v).strip()
+            return "" if s in ("nan","None","NaT") else s
+        b_invoice_number = bf2.text_input("Invoice #",     value=_sf(sel_job.get("invoice_number")),  key=f"rev_inv_{selected_rev_job_id}")
+        b_so_ticket      = bf3.text_input("SO / Ticket #", value=_sf(sel_job.get("so_ticket_number")), key=f"rev_so_{selected_rev_job_id}")
         b_accrue_raw = sel_job.get("accrue")
         b_accrue = bf4.checkbox(
             "Accrue",
@@ -3629,21 +3644,16 @@ with tab_history:
 
         active_bill = pd.DataFrame()
         if not bill_df.empty:
-            bill_df["start_date"] = pd.to_datetime(bill_df["start_date"], errors="coerce")
-            bill_df["end_date"]   = pd.to_datetime(bill_df["end_date"],   errors="coerce")
-            # Convert act_date to Timestamp for comparison with datetime64 columns
-            act_date_ts = pd.Timestamp(act_date)
+            bill_df["start_date"] = pd.to_datetime(bill_df["start_date"], errors="coerce").dt.date
+            bill_df["end_date"]   = pd.to_datetime(bill_df["end_date"],   errors="coerce").dt.date
             # Items with dates that cover act_date, OR items with no dates (lump charges)
             mask_dated = (
                 bill_df["start_date"].notna() &
-                (bill_df["start_date"] <= act_date_ts) &
-                (bill_df["end_date"]   >= act_date_ts)
+                (bill_df["start_date"] <= act_date) &
+                (bill_df["end_date"]   >= act_date)
             )
             mask_undated = bill_df["start_date"].isna()
             active_bill = bill_df[mask_dated | mask_undated].copy()
-            # Convert back to date for display
-            active_bill["start_date"] = active_bill["start_date"].dt.date
-            active_bill["end_date"]   = active_bill["end_date"].dt.date
 
         st.markdown(f"**Active as of {act_date.strftime('%m/%d/%Y')}**")
 
