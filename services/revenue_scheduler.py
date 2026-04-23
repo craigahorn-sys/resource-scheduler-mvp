@@ -605,31 +605,60 @@ def build_ticket_excel(job: dict, line_items_df) -> bytes:
         except Exception:
             pass
 
+    import math as _math
+    import pandas as _pd
+
+    def _cell(val):
+        """Safely convert a value to string, treating NaN/None as empty."""
+        if val is None:
+            return ""
+        try:
+            if isinstance(val, float) and (_math.isnan(val) or _math.isinf(val)):
+                return ""
+        except Exception:
+            pass
+        s = str(val).strip()
+        return "" if s in ("nan", "None", "NaT", "NaN") else s
+
+    def _date(val):
+        """Format a date value as MM/DD/YYYY."""
+        if val is None:
+            return ""
+        try:
+            if isinstance(val, float) and _math.isnan(val):
+                return ""
+            ts = _pd.to_datetime(val, errors="coerce")
+            if _pd.isna(ts):
+                return ""
+            return ts.strftime("%m/%d/%Y")
+        except Exception:
+            return str(val)
+
     # Row 1: SO / Ticket number
-    ws["H1"].value = str(job.get("so_ticket_number", "") or "")
+    ws["H1"].value = _cell(job.get("so_ticket_number"))
 
     # Row 6: Customer Name | Date of Service
-    ws["C6"].value = str(job.get("customer",       "") or "")
-    ws["F6"].value = str(job.get("job_start_date", "") or "")
+    ws["C6"].value = _cell(job.get("customer"))
+    ws["F6"].value = _date(job.get("job_start_date"))
 
     # Row 7: Ordered By | Job Name
-    ws["B7"].value = str(job.get("ordered_by", "") or "")
-    ws["F7"].value = str(job.get("job_name",   "") or "")
+    ws["B7"].value = _cell(job.get("ordered_by"))
+    ws["F7"].value = _cell(job.get("job_name"))
 
     # Row 8: Customer PO | County, State
-    ws["B8"].value = str(job.get("customer_po",  "") or "")
-    ws["F8"].value = str(job.get("county_state", "") or "")
+    ws["B8"].value = _cell(job.get("customer_po"))
+    ws["F8"].value = _cell(job.get("county_state"))
 
     # Row 9: Well Name | EES Supervisor
-    ws["B9"].value = str(job.get("well_name",     "") or "")
-    ws["F9"].value = str(job.get("ees_supervisor", "") or "")
+    ws["B9"].value = _cell(job.get("well_name"))
+    ws["F9"].value = _cell(job.get("ees_supervisor"))
 
     # Row 10: Well Number | Department
-    ws["B10"].value = str(job.get("well_number", "") or "")
-    ws["F10"].value = str(job.get("department",  "") or "")
+    ws["B10"].value = _cell(job.get("well_number"))
+    ws["F10"].value = _cell(job.get("department"))
 
     # Row 11: Job Description
-    ws["B11"].value = str(job.get("job_description", "") or "")
+    ws["B11"].value = _cell(job.get("job_description"))
 
     # Line items: write B (qty) and G (unit price) only
     # H column keeps =G*B formulas — do NOT write to H
