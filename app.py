@@ -2489,18 +2489,18 @@ with tab_revenue:
 
         # Row 2: Field ticket fields
         tf1, tf2, tf3 = st.columns(3)
-        b_ees_supervisor = tf1.text_input("EES Supervisor", value=str(sel_job.get("ees_supervisor", "") or ""), key=f"rev_sup_{selected_rev_job_id}")
-        b_customer_po    = tf2.text_input("Customer PO",    value=str(sel_job.get("customer_po",    "") or ""), key=f"rev_po_{selected_rev_job_id}")
-        b_county_state   = tf3.text_input("County & State", value=str(sel_job.get("county_state",   "") or ""), key=f"rev_cs_{selected_rev_job_id}")
+        b_ees_supervisor = tf1.text_input("EES Supervisor", value=_sf(sel_job.get("ees_supervisor")), key=f"rev_sup_{selected_rev_job_id}")
+        b_customer_po    = tf2.text_input("Customer PO",    value=_sf(sel_job.get("customer_po")),    key=f"rev_po_{selected_rev_job_id}")
+        b_county_state   = tf3.text_input("County & State", value=_sf(sel_job.get("county_state")),   key=f"rev_cs_{selected_rev_job_id}")
 
         tf4, tf5, tf6 = st.columns(3)
-        b_well_name      = tf4.text_input("Well Name",      value=str(sel_job.get("well_name",      "") or ""), key=f"rev_wn_{selected_rev_job_id}")
-        b_well_number    = tf5.text_input("Well Number",    value=str(sel_job.get("well_number",    "") or ""), key=f"rev_wnr_{selected_rev_job_id}")
-        b_department     = tf6.text_input("Department",     value=str(sel_job.get("department",     "") or ""), key=f"rev_dept_{selected_rev_job_id}")
+        b_well_name      = tf4.text_input("Well Name",      value=_sf(sel_job.get("well_name")),      key=f"rev_wn_{selected_rev_job_id}")
+        b_well_number    = tf5.text_input("Well Number",    value=_sf(sel_job.get("well_number")),    key=f"rev_wnr_{selected_rev_job_id}")
+        b_department     = tf6.text_input("Department",     value=_sf(sel_job.get("department")),     key=f"rev_dept_{selected_rev_job_id}")
 
         b_job_description = st.text_input(
             "Job Description (appears on ticket)",
-            value=str(sel_job.get("job_description", "") or ""),
+            value=_sf(sel_job.get("job_description")),
             key=f"rev_jd_{selected_rev_job_id}",
         )
 
